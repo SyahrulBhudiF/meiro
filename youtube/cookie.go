@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -26,6 +27,17 @@ type CookieAuth struct {
 	accountIndex   int
 	onBehalfOfUser string
 }
+
+const redactedCookieAuth = "youtube.CookieAuth(<redacted>)"
+
+// String prevents ordinary formatting from exposing browser credentials.
+func (CookieAuth) String() string { return redactedCookieAuth }
+
+// GoString prevents Go-syntax formatting from exposing browser credentials.
+func (CookieAuth) GoString() string { return redactedCookieAuth }
+
+// LogValue prevents structured logs from exposing browser credentials.
+func (CookieAuth) LogValue() slog.Value { return slog.StringValue(redactedCookieAuth) }
 
 // NewCookieAuth validates and stores a Cookie request-header value. The
 // exported API does not log or serialize this credential.

@@ -26,23 +26,24 @@ var (
 	errNotSignedIn = errors.New("not signed in")
 	// errSecretNotFound reports that the system store holds no such secret.
 	errSecretNotFound = errors.New("secret not found")
-	// errNoCredentialStore reports that the system has no credential store
-	// the app can reach, so the cookie stays in a file.
+	// errNoCredentialStore reports that persistent credential storage is
+	// unavailable on this system.
 	errNoCredentialStore = errors.New("no system credential store")
 )
 
 // newCookieStore returns the store the app keeps its sign-in in: the
 // operating system's credential store, with a file only its user can read
-// as the fallback. It does no work itself, so it is cheap to call on the main
-// thread.
+// as the fallback where file permissions protect it. It does no work itself,
+// so it is cheap to call on the main thread.
 func newCookieStore() (*keychainStore, error) {
 	directory, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
 		return nil, err
 	}
 	return &keychainStore{
-		system: secret{service: secretService, account: secretAccount},
-		file:   newFileStore(filepath.Join(directory, "cookie.txt")),
+		system:              secret{service: secretService, account: secretAccount},
+		file:                newFileStore(filepath.Join(directory, "cookie.txt")),
+		fileFallbackAllowed: runtime.GOOS != "windows",
 	}, nil
 }
 
@@ -57,8 +58,7 @@ type credentialStore interface {
 }
 
 // secret is a credential in the store the platform provides: the login
-// keychain on macOS and the Secret Service on Linux. Other systems have
-// neither, and the app keeps the cookie in a file there.
+// keychain on macOS and the Secret Service on Linux.
 type secret struct {
 	service string
 	account string
@@ -165,20 +165,23 @@ func (s secret) remove(ctx context.Context) error {
 		return nil
 	}
 	command := exec.CommandContext(ctx, program, "clear", "service", s.service, "account", s.account)
-	if err := command.Run(); err != nil && !missingSecret(err) {
+	// Output captures secret-tool diagnostics in ExitError.Stderr, which is
+	// needed to distinguish a missing secret from an operational failure.
+	if _, err := command.Output(); err != nil && !missingSecret(err) {
 		return fmt.Errorf("remove the sign-in from the system keychain: %w", err)
 	}
 	return nil
 }
 
 // missingSecret reports whether secret-tool failed because it holds no such
-// secret.
+// secret. Its documented missing-secret response is exit status 1 with no
+// diagnostic; other status-1 responses must remain errors.
 func missingSecret(err error) bool {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		return false
 	}
-	return exit.ExitCode() == 1
+	return exit.ExitCode() == 1 && len(strings.TrimSpace(string(exit.Stderr))) == 0
 }
 
 // cookieStore keeps the sign-in between runs.
@@ -189,15 +192,17 @@ type cookieStore interface {
 }
 
 // keychainStore keeps the sign-in, the Cookie header of the account's
-// browser session, in the system's credential store, and in a file only its
-// user can read when the system has no store or the store refuses it.
+// browser session, in the system's credential store. On platforms where file
+// permissions protect it, it can use a file when no system store exists.
 type keychainStore struct {
-	system credentialStore
-	file   *fileStore
+	system              credentialStore
+	file                *fileStore
+	fileFallbackAllowed bool
 }
 
 func (s *keychainStore) Load(ctx context.Context) (string, error) {
-	if s.system.available() {
+	systemAvailable := s.system.available()
+	if systemAvailable {
 		value, err := s.system.get(ctx)
 		if err == nil {
 			if err := s.file.Delete(ctx); err != nil {
@@ -212,13 +217,16 @@ func (s *keychainStore) Load(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	if !systemAvailable && !s.fileFallbackAllowed {
+		return "", errNoCredentialStore
+	}
 	// Use the private-permissions file only on systems without a credential
 	// store. A stale file is migrated when a store becomes available again.
 	cookie, err := s.file.Load(ctx)
 	if err != nil {
 		return "", err
 	}
-	if s.system.available() {
+	if systemAvailable {
 		if err := s.system.set(ctx, cookie); err != nil {
 			return "", err
 		}
@@ -242,6 +250,9 @@ func (s *keychainStore) Save(ctx context.Context, cookie string) error {
 			return fmt.Errorf("remove the obsolete sign-in file: %w", err)
 		}
 		return nil
+	}
+	if !s.fileFallbackAllowed {
+		return errNoCredentialStore
 	}
 	return s.file.Save(ctx, cookie)
 }

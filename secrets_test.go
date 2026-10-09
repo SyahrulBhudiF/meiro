@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -135,7 +136,7 @@ func TestCookieSaveDoesNotFallBackWhenTheSystemStoreFails(t *testing.T) {
 func TestCookieFallBackWithoutAStore(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "cookie.txt")
-	store := &keychainStore{system: &fakeKeychain{}, file: newFileStore(path)}
+	store := &keychainStore{system: &fakeKeychain{}, file: newFileStore(path), fileFallbackAllowed: true}
 
 	if err := store.Save(ctx, testCookie); err != nil {
 		t.Fatal(err)
@@ -146,6 +147,29 @@ func TestCookieFallBackWithoutAStore(t *testing.T) {
 	}
 	if cookie != testCookie {
 		t.Errorf("loaded %q", cookie)
+	}
+}
+
+func TestCookieDoesNotUseAFileWhenFallbackIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cookie.txt")
+	file := newFileStore(path)
+	store := &keychainStore{system: &fakeKeychain{}, file: file}
+
+	if err := store.Save(ctx, testCookie); !errors.Is(err, errNoCredentialStore) {
+		t.Fatalf("Save error = %v, want no credential store", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Save wrote a fallback file: %v", err)
+	}
+	if err := file.Save(ctx, testCookie); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(ctx); !errors.Is(err, errNoCredentialStore) {
+		t.Fatalf("Load error = %v, want no credential store", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Load removed an existing file: %v", err)
 	}
 }
 
@@ -220,6 +244,67 @@ func TestSignOutForgetsTheCookieEverywhere(t *testing.T) {
 	if _, err := store.Load(ctx); !errors.Is(err, errNotSignedIn) {
 		t.Errorf("Load after Delete = %v", err)
 	}
+}
+
+func TestSignOutReportsASecretDeletionFailure(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "cookie.txt")
+	removeErr := errors.New("the keychain is locked")
+	system := &fakeKeychain{usable: true, holds: true, value: testCookie, removeErr: removeErr}
+	store := &keychainStore{system: system, file: newFileStore(path)}
+
+	if err := store.Delete(ctx); !errors.Is(err, removeErr) {
+		t.Fatalf("Delete error = %v, want the keychain error", err)
+	}
+	if !system.holds {
+		t.Error("the test store deleted the cookie after reporting a deletion failure")
+	}
+}
+
+func TestSecretToolLookupDistinguishesMissingFromFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secret-tool is only used on Linux")
+	}
+
+	for _, test := range []struct {
+		name    string
+		script  string
+		missing bool
+	}{
+		{name: "missing", script: "exit 1", missing: true},
+		{name: "failure", script: "echo 'access denied' >&2\nexit 1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			probe := fakeSecretTool(t, test.script)
+			_, err := probe.get(context.Background())
+			if errors.Is(err, errSecretNotFound) != test.missing {
+				t.Fatalf("get error = %v, missing = %t; want %t", err, errors.Is(err, errSecretNotFound), test.missing)
+			}
+		})
+	}
+}
+
+func TestSecretToolRemovePropagatesAFailure(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("secret-tool is only used on Linux")
+	}
+	probe := fakeSecretTool(t, "echo 'access denied' >&2\nexit 1")
+
+	if err := probe.remove(context.Background()); err == nil {
+		t.Fatal("remove succeeded after secret-tool reported an error")
+	}
+}
+
+func fakeSecretTool(t *testing.T, script string) secret {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "secret-tool")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldSecretTool := secretTool
+	secretTool = func() string { return path }
+	t.Cleanup(func() { secretTool = oldSecretTool })
+	return secret{service: secretService, account: secretAccount}
 }
 
 // TestLiveKeychain uses the machine's own credential store. It needs one
