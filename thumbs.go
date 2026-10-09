@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg" // artwork decoders, for the colour taken from it
@@ -33,45 +34,141 @@ const thumbBudget = 128 << 20
 // bitmaps without downloading them again.
 const thumbSourceBudget = 32 << 20
 
-// thumbRetry is how long a failed download waits before the next try.
+// thumbRetry is how long a failed download first waits before the next try.
+// Each further failure doubles the wait, up to thumbRetryMax.
 const thumbRetry = 10 * time.Second
+
+// thumbRetryMax caps the wait between attempts at a picture that keeps
+// failing for a reason that may pass, such as a dropped connection.
+const thumbRetryMax = 5 * time.Minute
+
+// thumbFailures bounds the failure record, so that pages of broken covers
+// cannot grow it without end.
+const thumbFailures = 256
+
+// thumbQueueLimit bounds how many downloads wait at once. A page asks for
+// dozens of covers, and a fast scroll asks for more before the first have
+// landed; the least recently wanted wait is dropped and only asked for again
+// if it returns to view.
+const thumbQueueLimit = 128
+
+// thumbKeyMemo bounds the remembered (URL, size) derivations. The working set
+// is the covers on screen, so falling back to a fresh map costs one short
+// burst of regex work.
+const thumbKeyMemo = 4096
 
 // thumbCache keeps decoded artwork and a smaller cache of compressed sources.
 type thumbCache struct {
 	client *http.Client
 	notify func()
-	// slots bounds downloads and in-memory decodes that are under way.
-	slots chan struct{}
 	// synth, when set, answers every request without the network: tests give
 	// pages artwork of their own making.
 	synth func(url string, size int) *ui.Bitmap
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// cond wakes the workers that download and decode at most thumbFetches
+	// pictures at a time.
+	cond    *sync.Cond
+	queue   map[string]thumbJob
 	bitmaps map[string]*thumb
 	sources map[string]*thumbSource
 	// held and sourceHeld count their respective caches' bytes. tick orders
-	// bitmap touches and source-cache reads and writes for both LRUs.
+	// bitmap touches and source-cache reads and writes for both LRUs. seq
+	// orders waits in the queue, so the most recently wanted picture is
+	// served first.
 	held       int
 	sourceHeld int
 	tick       uint64
+	seq        uint64
 	pending    map[string]bool
-	// failed holds when each download last failed. A failure is only held
-	// for thumbRetry, so a dropped connection does not leave a cover blank
-	// for the rest of the session.
-	failed map[string]time.Time
+	// keys remembers the sized URL and the sizeless base for a (URL, size)
+	// pair, so repeated lookups skip the regex work.
+	keys map[thumbRequest]thumbKeys
+	// failed holds how each download or decode failed. A permanent failure,
+	// such as a 404 or a picture that will not decode, is never retried; a
+	// transient one backs off further with each attempt.
+	failed map[string]thumbFailure
 	// sizes remembers which sizes of each picture are in bitmaps, by the
 	// picture's URL without its size, so a small copy can stand in while a
 	// larger one downloads.
 	sizes map[string][]string
 }
 
+// thumbRequest is the (URL, size) pair a lookup asks about.
+type thumbRequest struct {
+	url  string
+	size int
+}
+
+// thumbKeys is the derivation of a thumbRequest: the URL asked for at that
+// size, and its sizeless base that groups every size of one picture.
+type thumbKeys struct {
+	sized string
+	base  string
+}
+
+// thumbJob is a picture waiting for a worker. A source means its compressed
+// bytes are already at hand, so no download is needed.
+type thumbJob struct {
+	tick   uint64
+	source []byte
+}
+
+// thumbFailure is how a failed picture waits for its next attempt.
+type thumbFailure struct {
+	at        time.Time
+	attempts  int
+	permanent bool
+}
+
+// wait is how long a failure waits before the next attempt: the base wait
+// doubled once per failure so far, never beyond the cap.
+func (f thumbFailure) wait() time.Duration {
+	wait := thumbRetry
+	for i := 1; i < f.attempts && wait < thumbRetryMax; i++ {
+		wait *= 2
+	}
+	return min(wait, thumbRetryMax)
+}
+
+// errTooLarge and errDecode mark a picture that will never load, however many
+// times it is asked for.
+var (
+	errTooLarge = errors.New("picture is larger than the limit")
+	errDecode   = errors.New("picture could not be decoded")
+)
+
+// statusError is a non-2xx answer from the picture host.
+type statusError struct{ code int }
+
+func (e statusError) Error() string { return "HTTP " + strconv.Itoa(e.code) }
+
+// permanentFailure reports whether asking for the same URL again could ever
+// succeed. A 4xx other than a timeout or a rate limit will not, and neither
+// will a picture that is too large or fails to decode.
+func permanentFailure(err error) bool {
+	var status statusError
+	if errors.As(err, &status) {
+		switch status.code {
+		case http.StatusRequestTimeout, http.StatusTooManyRequests:
+			return false
+		}
+		return status.code >= 400 && status.code < 500
+	}
+	return errors.Is(err, errTooLarge) || errors.Is(err, errDecode)
+}
+
 // thumb is one cached bitmap, the colour taken from it, and what it costs.
 type thumb struct {
-	bitmap    *ui.Bitmap
-	colour    ui.Color
-	hasColour bool
-	bytes     int
-	used      uint64
+	bitmap *ui.Bitmap
+	// colour is only taken from the picture when something asks for it, so
+	// covers never pay for a theme seed they will not use. colourReady
+	// separates "not taken yet" from "taken and found nothing".
+	colour      ui.Color
+	hasColour   bool
+	colourReady bool
+	bytes       int
+	used        uint64
 }
 
 // thumbSource is the compressed picture kept after its bitmap is evicted.
@@ -91,16 +188,22 @@ func thumbBytes(b *ui.Bitmap) int {
 // newThumbCache returns a cache that calls notify when a bitmap lands, so
 // the window draws it.
 func newThumbCache(notify func()) *thumbCache {
-	return &thumbCache{
+	t := &thumbCache{
 		client:  &http.Client{Timeout: 30 * time.Second},
 		notify:  notify,
 		bitmaps: make(map[string]*thumb),
 		sources: make(map[string]*thumbSource),
+		queue:   make(map[string]thumbJob),
 		pending: make(map[string]bool),
-		failed:  make(map[string]time.Time),
+		failed:  make(map[string]thumbFailure),
+		keys:    make(map[thumbRequest]thumbKeys),
 		sizes:   make(map[string][]string),
-		slots:   make(chan struct{}, thumbFetches),
 	}
+	t.cond = sync.NewCond(&t.mu)
+	for range thumbFetches {
+		go t.worker()
+	}
+	return t
 }
 
 // bitmap returns the artwork at url, asked for at size pixels across. While
@@ -123,28 +226,64 @@ func (t *thumbCache) bitmapIf(url string, size int, fetch bool) *ui.Bitmap {
 	if t.synth != nil {
 		return t.synth(url, size)
 	}
-	url = thumbnailURL(url, size)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if entry, ok := t.bitmaps[url]; ok {
+	key := t.keyLocked(url, size)
+	if entry, ok := t.bitmaps[key.sized]; ok {
 		return t.touch(entry)
 	}
-	if !t.pending[url] {
-		if source, ok := t.source(url); ok {
-			t.pending[url] = true
-			go t.rebuild(url, source)
-		} else if failedAt, ok := t.failed[url]; !ok || time.Since(failedAt) > thumbRetry {
-			delete(t.failed, url)
-			t.pending[url] = true
-			go t.fetch(url)
+	if t.pending[key.sized] {
+		// The picture is already on its way. Asking for it again means it
+		// is still visible, which moves it ahead of stale waits.
+		if job, queued := t.queue[key.sized]; queued {
+			t.seq++
+			job.tick = t.seq
+			t.queue[key.sized] = job
 		}
+	} else if source, ok := t.source(key.sized); ok {
+		t.pending[key.sized] = true
+		t.enqueueLocked(key.sized, source)
+	} else if t.retryDue(key.sized) {
+		t.pending[key.sized] = true
+		t.enqueueLocked(key.sized, nil)
 	}
-	for _, other := range t.sizes[sizeless(url)] {
+	for _, other := range t.sizes[key.base] {
 		if entry, ok := t.bitmaps[other]; ok {
 			return t.touch(entry)
 		}
 	}
 	return nil
+}
+
+// keyLocked derives the sized URL and sizeless base of a request, remembering
+// the answer so repeated lookups skip the regex work. The caller holds the
+// lock.
+func (t *thumbCache) keyLocked(url string, size int) thumbKeys {
+	request := thumbRequest{url: url, size: size}
+	if key, ok := t.keys[request]; ok {
+		return key
+	}
+	sized := thumbnailURL(url, size)
+	key := thumbKeys{sized: sized, base: sizeless(sized)}
+	if len(t.keys) >= thumbKeyMemo {
+		t.keys = make(map[thumbRequest]thumbKeys)
+	}
+	t.keys[request] = key
+	return key
+}
+
+// retryDue reports whether a missing picture may be asked for again. A
+// permanent failure never may; a transient one waits out its backoff. The
+// caller holds the lock.
+func (t *thumbCache) retryDue(url string) bool {
+	failure, ok := t.failed[url]
+	if !ok {
+		return true
+	}
+	if failure.permanent {
+		return false
+	}
+	return time.Since(failure.at) >= failure.wait()
 }
 
 // touch marks a bitmap as drawn now and returns it.
@@ -173,6 +312,72 @@ const thumbFetches = 6
 // thumbLimit is the largest picture the cache will take.
 const thumbLimit = 8 << 20
 
+// worker downloads and decodes one queued picture at a time. thumbFetches
+// workers run together, which bounds the cache's concurrent work.
+func (t *thumbCache) worker() {
+	for {
+		t.mu.Lock()
+		for len(t.queue) == 0 {
+			t.cond.Wait()
+		}
+		url, job := t.popLocked()
+		t.mu.Unlock()
+		if job.source != nil {
+			t.decode(url, job.source, false)
+			continue
+		}
+		data, err := t.download(url)
+		if err != nil {
+			t.failedFetch(url, err)
+			continue
+		}
+		t.decode(url, data, true)
+	}
+}
+
+// enqueueLocked adds a picture to the work queue, dropping the least recently
+// wanted wait when the queue is full. The caller holds the lock.
+func (t *thumbCache) enqueueLocked(url string, source []byte) {
+	if _, queued := t.queue[url]; !queued && len(t.queue) >= thumbQueueLimit {
+		t.dropStaleLocked()
+	}
+	t.seq++
+	t.queue[url] = thumbJob{tick: t.seq, source: source}
+	t.pending[url] = true
+	t.cond.Broadcast()
+}
+
+// popLocked takes the most recently wanted job, so visible pictures are not
+// starved by stale waits queued behind them. The caller holds the lock.
+func (t *thumbCache) popLocked() (string, thumbJob) {
+	url, found := "", false
+	for key, job := range t.queue {
+		if !found || job.tick > t.queue[url].tick {
+			url, found = key, true
+		}
+	}
+	job := t.queue[url]
+	delete(t.queue, url)
+	return url, job
+}
+
+// dropStaleLocked forgets the least recently wanted wait and lets a later
+// frame ask for it again only if it is still wanted. The caller holds the
+// lock.
+func (t *thumbCache) dropStaleLocked() {
+	stale, found := "", false
+	for url, job := range t.queue {
+		if !found || job.tick < t.queue[stale].tick {
+			stale, found = url, true
+		}
+	}
+	if !found {
+		return
+	}
+	delete(t.queue, stale)
+	delete(t.pending, stale)
+}
+
 // download fetches the picture at url.
 func (t *thumbCache) download(url string) ([]byte, error) {
 	request, err := http.NewRequest(http.MethodGet, url, nil)
@@ -185,7 +390,7 @@ func (t *thumbCache) download(url string) ([]byte, error) {
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
+		return nil, statusError{code: response.StatusCode}
 	}
 	// One byte more than the limit tells a picture that fits from one cut off.
 	data, err := io.ReadAll(io.LimitReader(response.Body, thumbLimit+1))
@@ -193,59 +398,76 @@ func (t *thumbCache) download(url string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > thumbLimit {
-		return nil, fmt.Errorf("larger than %d bytes", thumbLimit)
+		return nil, errTooLarge
 	}
 	return data, nil
 }
 
-// fetch downloads and decodes the picture at url, and stores it, or notes that
-// it failed.
-func (t *thumbCache) fetch(url string) {
-	t.slots <- struct{}{}
-	defer func() { <-t.slots }()
-	data, err := t.download(url)
-	if err != nil {
-		t.failedFetch(url)
-		return
-	}
-	t.decode(url, data, true)
-}
-
-// rebuild decodes a cached picture without fetching it again.
-func (t *thumbCache) rebuild(url string, data []byte) {
-	t.slots <- struct{}{}
-	defer func() { <-t.slots }()
-	t.decode(url, data, false)
-}
-
-// decode creates a bitmap and colour, retaining downloaded source bytes.
+// decode creates a bitmap, retaining downloaded source bytes. The colour is
+// taken later, when something asks for it.
 func (t *thumbCache) decode(url string, data []byte, keepSource bool) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		t.failedFetch(url)
+		t.failedFetch(url, fmt.Errorf("%w: %v", errDecode, err))
 		return
 	}
 	bitmap := ui.NewBitmap(img)
-	colour, hasColour := dominantColour(img)
 	t.mu.Lock()
 	delete(t.pending, url)
 	delete(t.failed, url)
 	if keepSource {
 		t.storeSource(url, data)
 	}
-	t.store(url, &thumb{bitmap: bitmap, colour: colour, hasColour: hasColour, bytes: thumbBytes(bitmap)})
+	t.store(url, &thumb{bitmap: bitmap, bytes: thumbBytes(bitmap)})
 	t.mu.Unlock()
 	t.notify()
 }
 
-// failedFetch notes a failed download or decode and schedules a retry.
-func (t *thumbCache) failedFetch(url string) {
+// failedFetch notes a failed download or decode and schedules a redraw for
+// the next attempt. A permanent failure is never retried, and a transient one
+// waits out an ever longer backoff.
+func (t *thumbCache) failedFetch(url string, err error) {
 	t.mu.Lock()
 	delete(t.pending, url)
-	t.failed[url] = time.Now()
+	failure := t.failed[url]
+	failure.attempts++
+	failure.at = time.Now()
+	failure.permanent = failure.permanent || permanentFailure(err)
+	t.failed[url] = failure
+	t.pruneFailedLocked()
+	wait, permanent := failure.wait(), failure.permanent
 	t.mu.Unlock()
+	if permanent {
+		return
+	}
 	// Draw again once the wait is over, so the next frame tries again.
-	time.AfterFunc(thumbRetry+time.Second, t.notify)
+	time.AfterFunc(wait+time.Second, t.notify)
+}
+
+// pruneFailedLocked keeps the failure record small: it forgets failures whose
+// retry wait has passed, then the oldest ones. The caller holds the lock.
+func (t *thumbCache) pruneFailedLocked() {
+	if len(t.failed) <= thumbFailures {
+		return
+	}
+	now := time.Now()
+	for url, failure := range t.failed {
+		if !failure.permanent && now.Sub(failure.at) >= failure.wait() {
+			delete(t.failed, url)
+		}
+	}
+	for len(t.failed) > thumbFailures {
+		oldest, found := "", false
+		for url, failure := range t.failed {
+			if !found || failure.at.Before(t.failed[oldest].at) {
+				oldest, found = url, true
+			}
+		}
+		if !found {
+			break
+		}
+		delete(t.failed, oldest)
+	}
 }
 
 // storeSource keeps compressed bytes under their own LRU budget. The caller
@@ -407,17 +629,41 @@ func sizeless(url string) string {
 }
 
 // colour returns the colour that stands out in the artwork at url, asked for
-// at size pixels across, once the artwork has landed.
+// at size pixels across, once the artwork has landed. The colour is taken
+// from the picture the first time something asks, so covers that never need
+// it never pay for it.
 func (t *thumbCache) colour(url string, size int) (ui.Color, bool) {
 	if url == "" {
 		return ui.Color{}, false
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	if entry, ok := t.bitmaps[thumbnailURL(url, size)]; ok && entry.hasColour {
-		return entry.colour, true
+	sized := t.keyLocked(url, size).sized
+	entry, ok := t.bitmaps[sized]
+	if !ok {
+		t.mu.Unlock()
+		return ui.Color{}, false
 	}
-	return ui.Color{}, false
+	if entry.colourReady {
+		colour, hasColour := entry.colour, entry.hasColour
+		t.mu.Unlock()
+		return colour, hasColour
+	}
+	data, ok := t.source(sized)
+	t.mu.Unlock()
+	if !ok {
+		return ui.Color{}, false
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return ui.Color{}, false
+	}
+	colour, hasColour := dominantColour(img)
+	t.mu.Lock()
+	if current, ok := t.bitmaps[sized]; ok && current == entry {
+		current.colour, current.hasColour, current.colourReady = colour, hasColour, true
+	}
+	t.mu.Unlock()
+	return colour, hasColour
 }
 
 // dominantColour finds the colour of a picture that a theme should grow from:
