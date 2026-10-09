@@ -90,7 +90,7 @@ func (a *app) rowView(c *ui.Context, i int) {
 	case rowColumns:
 		a.columnShelf(c, r)
 	case rowTrack:
-		a.songRow(c, r.item, a.playable, songOptions{number: r.number(), inset: true, fetchArtwork: true})
+		a.songRow(c, r.item, a.playable, songOptions{number: r.number(), list: "page:" + a.router.Path(), inset: true, fetchArtwork: true})
 	case rowMore:
 		ui.Row(c).Justify(ui.Center).Padding(16).Children(func() {
 			if m3.Button(c, m3.ButtonSpec{Label: r.title, Kind: m3.Tonal, Size: m3.Medium56, Key: "more"}).Clicked() {
@@ -180,7 +180,7 @@ func (a *app) columnShelf(c *ui.Context, r row) {
 				fetchArtwork := start/4 >= first && start/4 < last
 				ui.Column(c).Key(start).Width(columnWidth).Shrink(0).Children(func() {
 					for _, item := range group {
-						a.songRow(c, item, r.queue, songOptions{fetchArtwork: fetchArtwork})
+						a.songRow(c, item, r.queue, songOptions{list: r.shelf, fetchArtwork: fetchArtwork})
 					}
 				})
 			}
@@ -332,12 +332,22 @@ func (a *app) cardMenu(c *ui.Context, anchor ui.Element, key string, item youtub
 type songOptions struct {
 	// number shows a place in the list where the artwork would be.
 	number int
+	// list names the list the row belongs to, so that the same song in two
+	// lists, as in the queue behind a page of quick picks, is two rows with
+	// two keys rather than one shared menu.
+	list string
 	// inset puts the row in from the edges of the page, as the rows of a
 	// page of songs are; rows in a shelf sit flush.
 	inset        bool
 	directQueue  bool
 	source       string
 	fetchArtwork bool
+}
+
+// songKey identifies a row of a song in its list, for the element tree and
+// for the menu state that a row opens.
+func songKey(item youtube.MusicItem, o songOptions) string {
+	return itemKey("song", item) + strconv.Itoa(o.number) + "\x00" + o.list
 }
 
 // songRow shows a song, an album, an artist or a playlist as a row: artwork,
@@ -348,7 +358,7 @@ func (a *app) songRow(c *ui.Context, item youtube.MusicItem, queue []youtube.Mus
 	kind, _ := targetOf(item)
 	isSong := kind == pageTrack
 	playing := isSong && item.VideoID == a.current.VideoID
-	key := itemKey("song", item) + strconv.Itoa(o.number)
+	key := songKey(item, o)
 	row := ui.Row(c.Key(key))
 	row.Height(rowHeight).Shrink(0).Padding(8, 8).Gap(4).AlignItems(ui.Center).Radius(m3.Large)
 	if o.inset {

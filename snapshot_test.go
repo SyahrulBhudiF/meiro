@@ -145,7 +145,7 @@ func TestSnapshots(t *testing.T) {
 	track := a.feed.sections[0].Items[0]
 	track.BrowseID = "UCartist"
 	a.feed.sections[0].Items[0] = track
-	a.trackMenuKey = itemKey("song", track) + "0"
+	a.trackMenuKey = songKey(track, songOptions{list: "/home#0"})
 	a.trackMenuOpen = true
 	tt.Frame()
 	save(t, tt, "track-menu")

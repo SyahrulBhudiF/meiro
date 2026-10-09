@@ -298,6 +298,54 @@ func checkMenuAt(t *testing.T, tt *ui.Tester, item string, x, y float32) {
 	}
 }
 
+// The full-screen player leaves the page behind it built, and its queue lists
+// the same songs as the page's shelves. A row must key its menu to its own
+// list, or the hidden page's row opens a menu of its own, over the player.
+func TestQueueRowOpensOneMenuOverThePageBehind(t *testing.T) {
+	a, tt := newShotApp("/home", false)
+	a.current = songs("qp", "Glass Hours")[0]
+	a.queue = songs("qp", "Glass Hours", "Slow Burn", "Paper Lanterns", "Static Bloom")
+	a.total = 3 * time.Minute
+	a.npOpen = true
+	tt.Frame()
+
+	// Hover the queue row of Slow Burn, in the side panel, until its menu
+	// button shows. The page behind lists the same song, so a shared key
+	// would open that row's menu too.
+	hovered := false
+	for probe := float32(920); probe < 1140 && !hovered; probe += 20 {
+		for py := float32(280); py < 740; py += 16 {
+			tt.Move(probe, py)
+			tt.Frame()
+			if tt.HasText("More options for Slow Burn") {
+				hovered = true
+				break
+			}
+		}
+	}
+	if !hovered {
+		t.Fatalf("no queue row to right-click: %q", tt.Texts())
+	}
+	// Right-click the row itself, away from its menu button at the panel's
+	// right edge, where the menu would flip back over the pointer.
+	r, ok := tt.Find("More options for Slow Burn")
+	if !ok {
+		t.Fatalf("the queue row shows no menu button: %q", tt.Texts())
+	}
+	x, y := r.X-200, r.Y+r.H/2
+	tt.RightClickAt(x, y)
+	tt.Frame()
+	if !a.trackMenuOpen {
+		t.Fatal("a right-click on a queue row did not open its menu")
+	}
+	// One menu draws its items once as the item's label and once as its text,
+	// so a second menu over the page behind would double that count.
+	if n := strings.Count(strings.Join(tt.Texts(), "\n"), "Play next"); n != 2 {
+		t.Errorf("the queue row's menu opened %d times", n/2)
+	}
+	checkMenuAt(t, tt, "Play next", x, y)
+}
+
 func TestPlaylistListsAndQueuesVideoEntries(t *testing.T) {
 	a := newTestApp()
 	path := "/playlist/VLPL_video"
