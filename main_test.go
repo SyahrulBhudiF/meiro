@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"image/png"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1448,6 +1449,67 @@ func TestSettingsSavesAreOrderedAndIndependent(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Errorf("saving left %d files behind, want only the settings", len(entries))
+	}
+}
+
+func TestShutdownFlushesPendingSettings(t *testing.T) {
+	a := newTestApp()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	a.saver.write = func(s *settings, path string) error {
+		close(started)
+		<-release
+		return s.save(path)
+	}
+	a.settings.Volume = 13
+	a.saveSettings()
+	<-started
+
+	done := make(chan struct{})
+	go func() {
+		a.shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("shutdown returned before the pending settings save completed")
+	case <-time.After(time.Second):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not finish after the settings save completed")
+	}
+
+	if got := loadSettings(a.settingsPath); got.Volume != 13 {
+		t.Errorf("saved volume = %v, want 13", got.Volume)
+	}
+}
+
+func TestShutdownReportsSettingsSaveErrorsWithoutBlocking(t *testing.T) {
+	a := newTestApp()
+	a.settingsPath = filepath.Join(t.TempDir(), "settings.json")
+	writeErr := errors.New("disk is read-only")
+	var logs bytes.Buffer
+	oldOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(oldOutput) })
+	a.saver.write = func(*settings, string) error { return writeErr }
+	a.saveSettings()
+	done := make(chan struct{})
+	go func() {
+		a.shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown blocked after the settings save failed")
+	}
+	if !strings.Contains(logs.String(), writeErr.Error()) {
+		t.Errorf("settings save failure was not logged: %q", logs.String())
 	}
 }
 

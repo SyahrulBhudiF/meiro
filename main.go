@@ -277,6 +277,15 @@ func main() {
 		a.restoreAccount()
 	})
 	err := mygo.App.Run()
+	a.shutdown()
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// shutdown flushes settings before closing resources that belong to the app.
+func (a *app) shutdown() {
+	a.saver.wait()
 	if a.systemMedia != nil {
 		if closeErr := a.systemMedia.Close(); closeErr != nil {
 			log.Printf("close system media controls: %v", closeErr)
@@ -284,9 +293,6 @@ func main() {
 	}
 	a.player.Stop()
 	a.closeAudioCaches()
-	if err != nil {
-		log.Fatal(err)
-	}
 }
 
 // setup prepares the account and the settings: the token store and the two

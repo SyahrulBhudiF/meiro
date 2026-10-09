@@ -176,6 +176,7 @@ type settingsWriter struct {
 	path    string
 	running bool
 	idle    sync.WaitGroup
+	write   func(*settings, string) error
 }
 
 // save writes s to path soon. It keeps its own copy of s.
@@ -204,8 +205,12 @@ func (w *settingsWriter) drain() {
 			w.mu.Unlock()
 			return
 		}
+		write := w.write
 		w.mu.Unlock()
-		if err := s.save(path); err != nil {
+		if write == nil {
+			write = (*settings).save
+		}
+		if err := write(s, path); err != nil {
 			log.Printf("saving settings: %v", err)
 		}
 	}
