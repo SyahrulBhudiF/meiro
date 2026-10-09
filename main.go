@@ -289,8 +289,8 @@ func main() {
 	}
 }
 
-// setup prepares the account and the settings: the token store, the two
-// clients, and the sign-in an earlier run left behind.
+// setup prepares the account and the settings: the token store and the two
+// clients.
 func (a *app) setup() {
 	if directory, err := mygo.App.Path(mygo.PathUserData); err == nil {
 		a.settingsPath = filepath.Join(directory, "settings.json")
@@ -328,11 +328,6 @@ func (a *app) setup() {
 		return
 	}
 	a.store = store
-	a.run(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		store.forgetLegacy(ctx)
-	})
 }
 
 func (a *app) currentAudioCache() *audioCache {

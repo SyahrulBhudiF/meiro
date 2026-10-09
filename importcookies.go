@@ -16,7 +16,7 @@ import (
 
 // importSource is a browser the sign-in can take the session from.
 type importSource struct {
-	label, id string
+	label string
 	// read gives the Cookie header of the browser's YouTube session.
 	read func(ctx context.Context) (string, error)
 }
@@ -25,7 +25,7 @@ type importSource struct {
 // are tried in order so a signed-in secondary profile wins over an unsigned
 // default profile.
 type browserImport struct {
-	label, id string
+	label     string
 	selectors func() []string
 }
 
@@ -34,8 +34,7 @@ type browserImport struct {
 func importSources() []importSource {
 	var sources []importSource
 	for _, browser := range browserImports() {
-		browser := browser
-		sources = append(sources, importSource{browser.label, browser.id, func(ctx context.Context) (string, error) {
+		sources = append(sources, importSource{browser.label, func(ctx context.Context) (string, error) {
 			return firstSession(ctx, browser.label, browser.selectors(), ytDlpCookie)
 		}})
 	}
@@ -61,14 +60,14 @@ func heliumSource() (importSource, bool) {
 	}
 	if runtime.GOOS == "darwin" {
 		key := keychainKey{service: "Helium Storage Key", account: "Helium"}
-		return importSource{"Helium", "helium", func(ctx context.Context) (string, error) {
+		return importSource{"Helium", func(ctx context.Context) (string, error) {
 			return firstSession(ctx, "Helium", profiles, func(ctx context.Context, profile string) (string, error) {
 				return chromiumCookie(ctx, profile, key)
 			})
 		}}, true
 	}
 	selectors := profileSelectors(chromiumSpec("chromium", sessionKeyring()), profiles, false)
-	return importSource{"Helium", "helium", func(ctx context.Context) (string, error) {
+	return importSource{"Helium", func(ctx context.Context) (string, error) {
 		return firstSession(ctx, "Helium", selectors, ytDlpCookie)
 	}}, true
 }
@@ -144,12 +143,12 @@ func chromiumSpec(id, keyring string) string {
 
 func browserImports() []browserImport {
 	return []browserImport{
-		{"Chrome", "chrome", func() []string { return chromiumBrowserSelectors("chrome") }},
-		{"Safari", "safari", func() []string { return []string{"safari"} }},
-		{"Firefox", "firefox", firefoxBrowserSelectors},
-		{"Brave", "brave", func() []string { return chromiumBrowserSelectors("brave") }},
-		{"Edge", "edge", func() []string { return chromiumBrowserSelectors("edge") }},
-		{"Zen", "zen", zenBrowserSelectors},
+		{"Chrome", func() []string { return chromiumBrowserSelectors("chrome") }},
+		{"Safari", func() []string { return []string{"safari"} }},
+		{"Firefox", firefoxBrowserSelectors},
+		{"Brave", func() []string { return chromiumBrowserSelectors("brave") }},
+		{"Edge", func() []string { return chromiumBrowserSelectors("edge") }},
+		{"Zen", zenBrowserSelectors},
 	}
 }
 

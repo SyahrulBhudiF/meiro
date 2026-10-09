@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	_ "image/jpeg" // artwork decoders, for the colour taken from it
-	_ "image/png"
 	"io"
 	"net/http"
 	neturl "net/url"
@@ -18,7 +16,6 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
-	_ "golang.org/x/image/webp"
 
 	"github.com/elianiva/meiro/m3"
 )
@@ -217,10 +214,7 @@ func (t *thumbCache) bitmap(url string, size int) *ui.Bitmap {
 // outside the visible range use this to avoid touching cache entries or
 // starting work for clipped children.
 func (t *thumbCache) bitmapIf(url string, size int, fetch bool) *ui.Bitmap {
-	if url == "" {
-		return nil
-	}
-	if !fetch {
+	if url == "" || !fetch {
 		return nil
 	}
 	if t.synth != nil {
@@ -404,7 +398,9 @@ func (t *thumbCache) download(url string) ([]byte, error) {
 }
 
 // decode creates a bitmap, retaining downloaded source bytes. The colour is
-// taken later, when something asks for it.
+// taken later, when something asks for it. Package ui registers the JPEG, PNG,
+// GIF, WebP and BMP decoders with image.Decode, and this package imports ui,
+// so the artwork formats YouTube serves all decode here.
 func (t *thumbCache) decode(url string, data []byte, keepSource bool) {
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {

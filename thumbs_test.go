@@ -184,6 +184,24 @@ func TestThumbnailURLChoosesSmallerYouTubeVariants(t *testing.T) {
 			size: 320,
 			want: "https://images.example/video/hq720.jpg",
 		},
+		{
+			name: "sized url gets the asked-for size",
+			url:  "https://img.test/a=w544-h544-l90-rj",
+			size: 96,
+			want: "https://img.test/a=w96-h96-l90-rj",
+		},
+		{
+			name: "scaled url gets the asked-for scale",
+			url:  "https://img.test/a=s96-c-k-c0",
+			size: 64,
+			want: "https://img.test/a=s64-c-k-c0",
+		},
+		{
+			name: "a url without a size is left alone",
+			url:  "https://img.test/a",
+			size: 64,
+			want: "https://img.test/a",
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

@@ -978,18 +978,6 @@ func TestClockAndDuration(t *testing.T) {
 	}
 }
 
-func TestThumbnailURLAsksForASmallerPicture(t *testing.T) {
-	if got := thumbnailURL("https://img.test/a=w544-h544-l90-rj", 96); got != "https://img.test/a=w96-h96-l90-rj" {
-		t.Errorf("thumbnailURL = %q", got)
-	}
-	if got := thumbnailURL("https://img.test/a=s96-c-k-c0", 64); got != "https://img.test/a=s64-c-k-c0" {
-		t.Errorf("thumbnailURL = %q", got)
-	}
-	if got := thumbnailURL("https://img.test/a", 64); got != "https://img.test/a" {
-		t.Errorf("thumbnailURL = %q", got)
-	}
-}
-
 const homeResponse = `{"contents":{"sectionListRenderer":{"contents":[
 	{"musicCarouselShelfRenderer":{
 		"header":{"musicCarouselShelfBasicHeaderRenderer":{"title":{"runs":[{"text":"Quick picks"}]}}},

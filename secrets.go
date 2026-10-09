@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/egoist/mygo"
 	"github.com/go-macos/keychain"
@@ -19,8 +19,6 @@ import (
 const (
 	secretService = "com.elianiva.meiro"
 	secretAccount = "cookie"
-	// legacyAccount held the OAuth tokens of earlier versions.
-	legacyAccount = "oauth"
 )
 
 var (
@@ -36,17 +34,15 @@ var (
 // newCookieStore returns the store the app keeps its sign-in in: the
 // operating system's credential store, with a file only its user can read
 // as the fallback. It does no work itself, so it is cheap to call on the main
-// thread; forgetLegacy, which runs commands, belongs in the background.
+// thread.
 func newCookieStore() (*keychainStore, error) {
 	directory, err := mygo.App.Path(mygo.PathUserData)
 	if err != nil {
 		return nil, err
 	}
 	return &keychainStore{
-		system:     secret{service: secretService, account: secretAccount},
-		file:       newFileStore(filepath.Join(directory, "cookie.txt")),
-		legacy:     secret{service: secretService, account: legacyAccount},
-		legacyFile: filepath.Join(directory, "auth.json"),
+		system: secret{service: secretService, account: secretAccount},
+		file:   newFileStore(filepath.Join(directory, "cookie.txt")),
 	}, nil
 }
 
@@ -75,17 +71,25 @@ func (s secret) available() bool {
 	return s.program() != ""
 }
 
+// secretTool is where Linux's Secret Service is reached through, found once:
+// the program does not move while the app runs, so the repeated lookups a
+// credential-store call would otherwise make are needless work on the main
+// thread.
+var secretTool = sync.OnceValue(func() string {
+	path, err := exec.LookPath("secret-tool")
+	if err != nil {
+		return ""
+	}
+	return path
+})
+
 // program returns the command the platform's store is reached through, and
 // the empty string when it has none.
 func (s secret) program() string {
 	if runtime.GOOS != "linux" {
 		return ""
 	}
-	path, err := exec.LookPath("secret-tool")
-	if err != nil {
-		return ""
-	}
-	return path
+	return secretTool()
 }
 
 func (s secret) set(ctx context.Context, value string) error {
@@ -190,24 +194,6 @@ type cookieStore interface {
 type keychainStore struct {
 	system credentialStore
 	file   *fileStore
-	// legacy and legacyFile held the OAuth tokens of earlier versions.
-	legacy     credentialStore
-	legacyFile string
-}
-
-// forgetLegacy removes what earlier versions kept, the OAuth tokens, which
-// nothing reads any more. It runs commands, so it is not for the main thread.
-func (s *keychainStore) forgetLegacy(ctx context.Context) {
-	if s.legacy != nil {
-		if err := s.legacy.remove(ctx); err != nil {
-			log.Printf("forgetting an earlier sign-in: %v", err)
-		}
-	}
-	if s.legacyFile != "" {
-		if err := os.Remove(s.legacyFile); err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("forgetting an earlier sign-in: %v", err)
-		}
-	}
 }
 
 func (s *keychainStore) Load(ctx context.Context) (string, error) {
