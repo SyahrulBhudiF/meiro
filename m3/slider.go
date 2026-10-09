@@ -6,6 +6,18 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+// hueSteps is how many bands paint the hue slider's spectrum; hueStrip holds
+// their colours, derived once rather than on every paint.
+const hueSteps = 144
+
+var hueStrip = func() [hueSteps]ui.Color {
+	var strip [hueSteps]ui.Color
+	for i := range strip {
+		strip[i] = FromHue(float64(i) * 360 / hueSteps)
+	}
+	return strip
+}()
+
 // SliderSpec describes a slider.
 type SliderSpec struct {
 	Label string
@@ -52,10 +64,10 @@ func Slider(c *ui.Context, value *float64, lo, hi float64, spec SliderSpec) ui.E
 	}
 	frac = min(max(frac, 0), 1)
 	pressed := s.Pressed()
-	handleW := Animate(s, "handle", map[bool]float32{false: 4, true: 2}[pressed], SpatialFast)
+	handleW := Animate(s, "handle", pick(pressed, float32(2), 4), SpatialFast)
 	amplitude := float32(0)
 	if spec.Wavy {
-		amplitude = Animate(s, "wave", map[bool]float32{false: 0, true: 2.4}[spec.Waving], SpatialDefault)
+		amplitude = Animate(s, "wave", pick(spec.Waving, float32(2.4), 0), SpatialDefault)
 	}
 	active, inactive, handle := sc.Primary, sc.SecondaryContainer, sc.Primary
 	if spec.Hue {
@@ -79,10 +91,9 @@ func Slider(c *ui.Context, value *float64, lo, hi float64, spec SliderSpec) ui.E
 		if spec.Hue {
 			track := ui.Rect{X: x0, Y: cy - thick/2, W: x1 - x0, H: thick}
 			p.Clip(track, radius, func() {
-				const steps = 144
-				w := track.W / steps
-				for i := 0; i < steps; i++ {
-					p.Fill(ui.Rect{X: track.X + w*float32(i), Y: track.Y, W: w + 0.75, H: track.H}, FromHue(float64(i)*360/steps), 0)
+				w := track.W / hueSteps
+				for i := 0; i < hueSteps; i++ {
+					p.Fill(ui.Rect{X: track.X + w*float32(i), Y: track.Y, W: w + 0.75, H: track.H}, hueStrip[i], 0)
 				}
 			})
 			p.Fill(ui.Rect{X: hx - 3, Y: cy - handleH/2, W: 6, H: handleH}, sc.Surface, 3)

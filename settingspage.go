@@ -200,11 +200,25 @@ func (a *app) swatch(c *ui.Context, name, hex string) bool {
 	return b.Clicked()
 }
 
+// stylePreview returns the scheme a palette style would give the seed in a
+// light or dark appearance, reusing what it resolved until either changes.
+func (a *app) stylePreview(seed ui.Color, dark bool, style m3.Style) m3.Scheme {
+	if a.previews == nil || seed != a.previewSeed || dark != a.previewDark {
+		a.previews, a.previewSeed, a.previewDark = make(map[m3.Style]m3.Scheme, len(m3.Styles)), seed, dark
+	}
+	if preview, ok := a.previews[style]; ok {
+		return preview
+	}
+	preview := m3.NewScheme(m3.NewPalettes(seed, style), dark)
+	a.previews[style] = preview
+	return preview
+}
+
 // styleTile previews a palette style in the colours the seed would give it.
 func (a *app) styleTile(c *ui.Context, style m3.Style) bool {
 	th := m3.Active()
 	sc := th.Scheme
-	preview := m3.NewScheme(m3.NewPalettes(th.Seed, style), th.Dark)
+	preview := a.stylePreview(th.Seed, th.Dark, style)
 	selected := th.Style == style
 	b := ui.ButtonBase(c.Key("style-" + style.String()))
 	b.Column().AlignItems(ui.Stretch).Width(138).Padding(14).Gap(10).Radius(m3.ExtraLarge - 4).Background(preview.PrimaryContainer).Cursor(ui.CursorPointer).

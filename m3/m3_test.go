@@ -2,11 +2,22 @@ package m3
 
 import (
 	"math"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/egoist/mygo/ui"
 )
+
+// The hue slider's spectrum is precomputed; it must still be what FromHue
+// gives for each band.
+func TestHueStripMatchesFromHue(t *testing.T) {
+	for i := range hueStrip {
+		if want := FromHue(float64(i) * 360 / hueSteps); hueStrip[i] != want {
+			t.Fatalf("hue band %d = %v, want %v", i, hueStrip[i], want)
+		}
+	}
+}
 
 func TestAnimatedPaintIntervalCapsPlaybackAnimationRate(t *testing.T) {
 	if animatedPaintInterval != 33*time.Millisecond {
@@ -127,6 +138,21 @@ func TestMixingSchemesBlendsEveryRole(t *testing.T) {
 	if mid.Surface == light.Surface || mid.Surface == dark.Surface || mid.OnSurface == light.OnSurface {
 		t.Errorf("mixing halfway left roles at their ends")
 	}
+	// Every colour role takes part, so Mix cannot silently leave one behind.
+	colour := reflect.TypeOf(ui.Color{})
+	lv, dv, mv := reflect.ValueOf(light), reflect.ValueOf(dark), reflect.ValueOf(mid)
+	for i := 0; i < lv.NumField(); i++ {
+		if lv.Field(i).Type() != colour {
+			continue
+		}
+		from, to := lv.Field(i).Interface(), dv.Field(i).Interface()
+		if from == to {
+			continue // scrim and shadow are black in both appearances
+		}
+		if got := mv.Field(i).Interface(); got == from || got == to {
+			t.Errorf("%s did not blend: %v, from %v to %v", lv.Type().Field(i).Name, got, from, to)
+		}
+	}
 }
 
 func TestThemeModes(t *testing.T) {
@@ -138,6 +164,20 @@ func TestThemeModes(t *testing.T) {
 	}
 	if !New(Config{}, true).Dark || New(Config{}, false).Dark {
 		t.Errorf("System mode did not follow the desktop")
+	}
+}
+
+func TestCarouselNeedsMeasurementOnce(t *testing.T) {
+	s := &CarouselState{}
+	if !s.NeedsMeasurement() {
+		t.Error("an unmeasured carousel did not ask for a frame")
+	}
+	if s.NeedsMeasurement() {
+		t.Error("an unmeasured carousel asked for another frame")
+	}
+	measured := &CarouselState{view: 100}
+	if measured.NeedsMeasurement() {
+		t.Error("a measured carousel asked for a frame")
 	}
 }
 

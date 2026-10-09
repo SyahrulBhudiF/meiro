@@ -8,6 +8,14 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
+// pick returns yes when b is true, else no: a choice without a map lookup.
+func pick[T any](b bool, yes, no T) T {
+	if b {
+		return yes
+	}
+	return no
+}
+
 // Switch builds a Material 3 switch: a pill track and a thumb that grows when
 // it is on, shrinks when it is off and swells while pressed, with a check
 // mark in the thumb when on. It toggles *on by itself.
@@ -16,7 +24,7 @@ func Switch(c *ui.Context, on *bool, label string) ui.Element {
 	s := ui.SwitchBase(c.Key("switch-"+label), on).Size(52, 32).Radius(Full).Label(label).
 		Cursor(ui.CursorPointer).Shrink(0)
 	v := *on
-	progress := Animate(s, "on", map[bool]float32{false: 0, true: 1}[v], SpatialFast)
+	progress := Animate(s, "on", pick(v, float32(1), 0), SpatialFast)
 	pressed := s.Pressed()
 	hovered := s.Hovered()
 	focused := s.FocusVisible()
@@ -193,6 +201,9 @@ type CarouselState struct {
 	target  float32
 	gliding bool
 	view    float32
+	// asked records that a caller was told the carousel needs measuring, so
+	// it asks only once.
+	asked bool
 }
 
 // Page glides a carousel one page toward the end (1) or the start (-1).
@@ -211,6 +222,18 @@ func (s *CarouselState) CanPage(direction int) bool {
 		return s.X > 1
 	}
 	return s.X < s.MaxX-1
+}
+
+// NeedsMeasurement reports whether the carousel has not been laid out yet, so
+// a caller that planned its items from the viewport asks for the frame that
+// measures it. It answers true once, so a carousel that is never laid out
+// does not ask again every frame.
+func (s *CarouselState) NeedsMeasurement() bool {
+	if s.view > 0 || s.asked {
+		return false
+	}
+	s.asked = true
+	return true
 }
 
 // VisibleRange returns the item indices to show or prefetch for a carousel.

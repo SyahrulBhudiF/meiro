@@ -89,11 +89,17 @@ type app struct {
 	cacheDirectoryText  string
 	cacheDirectoryError string
 	// The theme being shown. A change of colours glides from one scheme to
-	// the next rather than cutting.
+	// the next rather than cutting. themeCached is the last theme resolved,
+	// reused while the settings and appearance that make it are unchanged.
 	shown     *m3.Theme
 	themeTo   *m3.Theme
 	themeFrom m3.Scheme
 	themeAt   time.Time
+	// themeCached, themeCachedCfg and themeCachedDark remember the theme
+	// settings.config and the appearance last resolved.
+	themeCached     *m3.Theme
+	themeCachedCfg  m3.Config
+	themeCachedDark bool
 	// dynamic is the seed taken from the artwork playing.
 	dynamic   ui.Color
 	dynamicOK bool
@@ -105,14 +111,25 @@ type app struct {
 	focusSearch bool
 	rows        []row
 	playable    []youtube.MusicItem
-	list        ui.ListState
+	// rowsDirty marks the flattened rows stale. A change of the page's data
+	// sets it, and the next frame rebuilds them; otherwise they are reused.
+	// rowsKey is the shape they were built from, so a change a caller did not
+	// mark still rebuilds them.
+	rowsDirty bool
+	rowsKey   rowsKey
+	list      ui.ListState
 	// detail is the heading of the album, playlist or artist page shown,
 	// and details remembers one for each page the user opened, so going
 	// back to one finds its heading again.
 	detail  detail
 	details map[string]detail
 	// carousels keep the scroll of each shelf.
-	carousels     map[string]*m3.CarouselState
+	carousels map[string]*m3.CarouselState
+	// previews caches the palette-style preview schemes the settings show,
+	// until the seed or appearance they are drawn from changes.
+	previews      map[m3.Style]m3.Scheme
+	previewSeed   ui.Color
+	previewDark   bool
 	menuOpen      bool
 	trackMenuOpen bool
 	trackMenuKey  string
@@ -226,24 +243,6 @@ func newApp() *app {
 	a.thumbs = newThumbCache(a.refresh)
 	a.player.SetVolume(a.volume / 100)
 	return a
-}
-
-// lastReclaim is when reclaimMemory last ran, in Unix nanoseconds.
-var lastReclaim atomic.Int64
-
-// reclaimMemory gives the runtime's free memory back to the system. Reading a
-// page builds far more garbage than it keeps, and the runtime would sit on
-// that memory for a while after. It is for the app to ask, not the youtube
-// package, and no more than every few seconds, for a run of loads costs one
-// collection.
-func reclaimMemory() {
-	const every = 5 * time.Second
-	now := time.Now().UnixNano()
-	last := lastReclaim.Load()
-	if now-last < int64(every) || !lastReclaim.CompareAndSwap(last, now) {
-		return
-	}
-	debug.FreeOSMemory()
 }
 
 func main() {
@@ -587,7 +586,11 @@ func (a *app) resolveTheme(c *ui.Context) *m3.Theme {
 	if a.settings.Dynamic && a.dynamicOK {
 		cfg.Seed = a.dynamic
 	}
-	target := m3.New(cfg, c.Theme().Dark)
+	dark := c.Theme().Dark
+	if a.themeCached == nil || a.themeCachedCfg != cfg || a.themeCachedDark != dark {
+		a.themeCached, a.themeCachedCfg, a.themeCachedDark = m3.New(cfg, dark), cfg, dark
+	}
+	target := a.themeCached
 	if a.themeTo == nil {
 		a.themeTo, a.shown = target, target
 		a.themeFrom = target.Scheme

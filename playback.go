@@ -130,7 +130,6 @@ func (a *app) ensureUpNext() {
 		} else {
 			result, err = client.ContinueUpNext(ctx, options, continuation)
 		}
-		defer reclaimMemory()
 		a.update(func() {
 			if generation != a.upNextGeneration {
 				return
@@ -288,7 +287,6 @@ func (a *app) stream(item youtube.MusicItem) {
 			streamURL, total, err = ytDlpStream(ctx, item.VideoID, cookie)
 			cancel()
 		}
-		defer reclaimMemory()
 		a.update(func() {
 			if gen != a.streamGen {
 				return // another track was chosen while this one resolved

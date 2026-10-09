@@ -116,6 +116,7 @@ func (r row) key() any {
 func (a *app) onNavigate() {
 	a.feed = pageState{}
 	a.rows, a.playable = nil, nil
+	a.rowsDirty = true
 	// The list is shared by every page, so a new page starts at its top.
 	a.list.ScrollTo(0, ui.Start)
 	a.npOpen = false
@@ -210,15 +211,16 @@ func (a *app) fetch(load func(ctx context.Context, client *youtube.Client) (*you
 		return
 	}
 	a.feed.loading, a.feed.err = true, ""
+	a.rowsDirty = true
 	job := a.nextJob()
 	ctx := a.jobContext()
 	a.run(func() {
 		result, err := load(ctx, client)
-		defer reclaimMemory()
 		a.update(func() {
 			if job != a.job {
 				return
 			}
+			a.rowsDirty = true
 			a.feed.loading = false
 			if err != nil {
 				a.feed.err = err.Error()
@@ -261,6 +263,7 @@ func (a *app) runSearch(query string) {
 	a.cancelSuggestions()
 	if query == "" {
 		a.search = searchState{kind: a.search.kind}
+		a.rowsDirty = true
 		return
 	}
 	a.search.query, a.search.submitted = query, query
@@ -273,6 +276,7 @@ func (a *app) runSearch(query string) {
 	}
 	a.search.loading, a.search.err, a.search.more = true, "", ""
 	a.search.items = nil
+	a.rowsDirty = true
 	a.list.ScrollTo(0, ui.Start)
 	job := a.nextJob()
 	ctx := a.jobContext()
@@ -283,6 +287,7 @@ func (a *app) runSearch(query string) {
 			if job != a.job {
 				return
 			}
+			a.rowsDirty = true
 			a.search.loading = false
 			if err != nil {
 				a.search.err = err.Error()
@@ -302,6 +307,7 @@ func (a *app) loadMore() {
 	}
 	token, searching := s.more, a.router.Path() == "/search"
 	s.more, s.moreErr = "", ""
+	a.rowsDirty = true
 	// A page load that begins meanwhile, or a navigation, makes this result
 	// stale; asking for more must not itself cancel one in flight.
 	job := a.job
@@ -326,6 +332,7 @@ func (a *app) loadMore() {
 			if job != a.job {
 				return
 			}
+			a.rowsDirty = true
 			if err != nil {
 				s.more, s.moreErr = token, err.Error()
 				return
@@ -352,6 +359,57 @@ func (a *app) pageState() *pageState {
 // isDetail reports whether the page is an album, a playlist or an artist.
 func isDetail(path string) bool {
 	return strings.HasPrefix(path, "/album/") || strings.HasPrefix(path, "/playlist/") || strings.HasPrefix(path, "/artist/")
+}
+
+// rowsKey summarises what setRows reads, cheaply. Comparing it each frame
+// rebuilds the rows whenever the page's shape changes, even when a caller did
+// not mark them stale; a content change within the same shape still marks
+// them with rowsDirty.
+type rowsKey struct {
+	path    string
+	detail  detail
+	loading bool
+	err     string
+	more    string
+	moreErr string
+	// shelves folds the sections' titles and item counts into one number, and
+	// loose is how many items a page without sections holds.
+	shelves uint64
+	loose   int
+}
+
+// rowsKeyOf describes the page the rows are built from.
+func (a *app) rowsKeyOf() rowsKey {
+	s := a.pageState()
+	return rowsKey{
+		path: a.router.Path(), detail: a.detail,
+		loading: s.loading, err: s.err, more: s.more, moreErr: s.moreErr,
+		shelves: shelfShape(s.sections), loose: len(s.items),
+	}
+}
+
+// shelfShape folds each section's title and item count into one number, as
+// FNV-1a: a cheap stand-in for the sections themselves.
+func shelfShape(sections []youtube.MusicSection) uint64 {
+	shape := uint64(14695981039346656037)
+	for _, section := range sections {
+		for _, r := range section.Title {
+			shape = (shape ^ uint64(r)) * 1099511628211
+		}
+		shape = (shape ^ uint64(len(section.Items))) * 1099511628211
+		shape = (shape ^ '|') * 1099511628211
+	}
+	return shape
+}
+
+// syncRows rebuilds the rows when the page's data changed since the last
+// build, so an idle page reuses them frame after frame.
+func (a *app) syncRows() {
+	key := a.rowsKeyOf()
+	if a.rows == nil || a.rowsDirty || key != a.rowsKey {
+		a.rowsKey, a.rowsDirty = key, false
+		a.setRows()
+	}
 }
 
 // setRows flattens the loaded page into the rows its list shows, and

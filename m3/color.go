@@ -2,7 +2,6 @@ package m3
 
 import (
 	"math"
-	"reflect"
 
 	"github.com/egoist/mygo/ui"
 )
@@ -318,15 +317,45 @@ func luminance(c ui.Color) float64 {
 // glides to its next colours by mixing, instead of cutting.
 func (s Scheme) Mix(o Scheme, t float32) Scheme {
 	out := s
-	colour := reflect.TypeOf(ui.Color{})
-	sv, ov, rv := reflect.ValueOf(s), reflect.ValueOf(o), reflect.ValueOf(&out).Elem()
-	for i := 0; i < rv.NumField(); i++ {
-		if rv.Field(i).Type() != colour {
-			continue
-		}
-		mixed := sv.Field(i).Interface().(ui.Color).Mix(ov.Field(i).Interface().(ui.Color), t)
-		rv.Field(i).Set(reflect.ValueOf(mixed))
-	}
+	out.Primary = s.Primary.Mix(o.Primary, t)
+	out.OnPrimary = s.OnPrimary.Mix(o.OnPrimary, t)
+	out.PrimaryContainer = s.PrimaryContainer.Mix(o.PrimaryContainer, t)
+	out.OnPrimaryContainer = s.OnPrimaryContainer.Mix(o.OnPrimaryContainer, t)
+
+	out.Secondary = s.Secondary.Mix(o.Secondary, t)
+	out.OnSecondary = s.OnSecondary.Mix(o.OnSecondary, t)
+	out.SecondaryContainer = s.SecondaryContainer.Mix(o.SecondaryContainer, t)
+	out.OnSecondaryContainer = s.OnSecondaryContainer.Mix(o.OnSecondaryContainer, t)
+
+	out.Tertiary = s.Tertiary.Mix(o.Tertiary, t)
+	out.OnTertiary = s.OnTertiary.Mix(o.OnTertiary, t)
+	out.TertiaryContainer = s.TertiaryContainer.Mix(o.TertiaryContainer, t)
+	out.OnTertiaryContainer = s.OnTertiaryContainer.Mix(o.OnTertiaryContainer, t)
+
+	out.Error = s.Error.Mix(o.Error, t)
+	out.OnError = s.OnError.Mix(o.OnError, t)
+	out.ErrorContainer = s.ErrorContainer.Mix(o.ErrorContainer, t)
+	out.OnErrorContainer = s.OnErrorContainer.Mix(o.OnErrorContainer, t)
+
+	out.Surface = s.Surface.Mix(o.Surface, t)
+	out.OnSurface = s.OnSurface.Mix(o.OnSurface, t)
+	out.OnSurfaceVariant = s.OnSurfaceVariant.Mix(o.OnSurfaceVariant, t)
+	out.SurfaceDim = s.SurfaceDim.Mix(o.SurfaceDim, t)
+	out.SurfaceBright = s.SurfaceBright.Mix(o.SurfaceBright, t)
+	out.SurfaceContainerLowest = s.SurfaceContainerLowest.Mix(o.SurfaceContainerLowest, t)
+	out.SurfaceContainerLow = s.SurfaceContainerLow.Mix(o.SurfaceContainerLow, t)
+	out.SurfaceContainer = s.SurfaceContainer.Mix(o.SurfaceContainer, t)
+	out.SurfaceContainerHigh = s.SurfaceContainerHigh.Mix(o.SurfaceContainerHigh, t)
+	out.SurfaceContainerHighest = s.SurfaceContainerHighest.Mix(o.SurfaceContainerHighest, t)
+
+	out.Outline = s.Outline.Mix(o.Outline, t)
+	out.OutlineVariant = s.OutlineVariant.Mix(o.OutlineVariant, t)
+	out.InverseSurface = s.InverseSurface.Mix(o.InverseSurface, t)
+	out.InverseOnSurface = s.InverseOnSurface.Mix(o.InverseOnSurface, t)
+	out.InversePrimary = s.InversePrimary.Mix(o.InversePrimary, t)
+	out.Scrim = s.Scrim.Mix(o.Scrim, t)
+	out.Shadow = s.Shadow.Mix(o.Shadow, t)
+
 	if t >= 0.5 {
 		out.Dark = o.Dark
 	}

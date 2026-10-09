@@ -42,7 +42,7 @@ type RailEvent struct {
 func Rail(c *ui.Context, spec RailSpec) RailEvent {
 	var event RailEvent
 	rail := ui.Column(c).Key("m3-rail")
-	width := Animate(rail, "width", map[bool]float32{false: RailCollapsed, true: RailExpanded}[spec.Expanded], SpatialDefault)
+	width := Animate(rail, "width", pick(spec.Expanded, RailExpanded, RailCollapsed), SpatialDefault)
 	railWidth := max(width, RailCollapsed-8)
 	rail.Width(railWidth).Shrink(0).FillHeight().ClipX().PaddingY(12).Gap(4)
 	align := ui.Center
@@ -54,8 +54,8 @@ func Rail(c *ui.Context, spec RailSpec) RailEvent {
 			ui.Box(c).Height(spec.TopInset).FillWidth().Shrink(0).DragWindow()
 		}
 		menu := IconButton(c, IconButtonSpec{
-			Icon:  map[bool]*ui.SVG{false: IconMenu, true: IconMenuOpen}[spec.Expanded],
-			Label: map[bool]string{false: "Expand navigation", true: "Collapse navigation"}[spec.Expanded],
+			Icon:  pick(spec.Expanded, IconMenuOpen, IconMenu),
+			Label: pick(spec.Expanded, "Collapse navigation", "Expand navigation"),
 			Key:   "rail-menu",
 		})
 		if spec.Expanded {

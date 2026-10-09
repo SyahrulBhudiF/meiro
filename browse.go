@@ -53,7 +53,7 @@ func (a *app) recapPage(c *ui.Context) {
 // pageList builds the rows of the page in a list that builds only those in
 // view, so a page of hundreds of songs is as light as one of ten.
 func (a *app) pageList(c *ui.Context) {
-	a.setRows()
+	a.syncRows()
 	// A button in a row can reload the page, and empty the rows, while the list
 	// still looks for the row that held the focus.
 	a.list.Key = func(i int) any {
@@ -154,38 +154,66 @@ func (a *app) sectionHeading(c *ui.Context, r row, paged, first bool) {
 	})
 }
 
-// cardShelf is a row of cards that scrolls sideways.
+// cardShelf is a row of cards that scrolls sideways. Only the cards in view
+// are built; what is off view keeps its width as a spacer, so the shelf
+// scrolls exactly as it did when every card was built.
 func (a *app) cardShelf(c *ui.Context, r row) {
+	const gap = 4
 	st := a.carousel(r.shelf)
-	first, last := st.VisibleRange(len(r.items), cardWidth, 4, pageGutter-8, 1)
+	again := st.NeedsMeasurement()
+	first, last := st.VisibleRange(len(r.items), cardWidth, gap, pageGutter-8, 1)
 	ui.Column(c).Children(func() {
-		m3.Carousel(c, st, r.shelf, 4, pageGutter-8, func() {
-			for i, item := range r.items {
-				a.card(c, item, r.queue, i >= first && i < last)
+		m3.Carousel(c, st, r.shelf, gap, pageGutter-8, func() {
+			shelfSpacer(c, float32(first)*(cardWidth+gap)-gap)
+			for i := first; i < last; i++ {
+				a.card(c, r.items[i], r.queue, true)
 			}
+			shelfSpacer(c, float32(len(r.items)-last)*(cardWidth+gap)-gap)
 		})
 	})
+	if again {
+		// The first frame planned from a viewport that is not measured yet;
+		// the next one fills the shelf with the width it now knows.
+		c.Invalidate()
+	}
+}
+
+// shelfSpacer stands in for the items of a shelf that are off view, so the
+// shelf keeps the width all of them would have taken. A width of zero or
+// less is nothing to stand in for.
+func shelfSpacer(c *ui.Context, width float32) {
+	if width > 0 {
+		ui.Box(c).Width(width).Shrink(0)
+	}
 }
 
 // columnShelf is songs in columns of four, which scroll sideways: the shelf
-// of quick picks.
+// of quick picks. As the card shelf, it builds only the columns in view.
 func (a *app) columnShelf(c *ui.Context, r row) {
+	const gap = 8
 	st := a.carousel(r.shelf)
+	again := st.NeedsMeasurement()
 	groups := (len(r.items) + 3) / 4
-	first, last := st.VisibleRange(groups, columnWidth, 8, pageGutter-8, 1)
+	first, last := st.VisibleRange(groups, columnWidth, gap, pageGutter-8, 1)
 	ui.Column(c).Children(func() {
-		m3.Carousel(c, st, r.shelf, 8, pageGutter-8, func() {
-			for start := 0; start < len(r.items); start += 4 {
+		m3.Carousel(c, st, r.shelf, gap, pageGutter-8, func() {
+			shelfSpacer(c, float32(first)*(columnWidth+gap)-gap)
+			for g := first; g < last; g++ {
+				start := g * 4
 				group := r.items[start:min(start+4, len(r.items))]
-				fetchArtwork := start/4 >= first && start/4 < last
 				ui.Column(c).Key(start).Width(columnWidth).Shrink(0).Children(func() {
 					for _, item := range group {
-						a.songRow(c, item, r.queue, songOptions{list: r.shelf, fetchArtwork: fetchArtwork})
+						a.songRow(c, item, r.queue, songOptions{list: r.shelf, fetchArtwork: true})
 					}
 				})
 			}
+			shelfSpacer(c, float32(groups-last)*(columnWidth+gap)-gap)
 		})
 	})
+	if again {
+		// As the card shelf: plan again once the viewport is known.
+		c.Invalidate()
+	}
 }
 
 func itemKey(prefix string, item youtube.MusicItem) string {
