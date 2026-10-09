@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ type audioCache struct {
 	mu       sync.Mutex
 	dir      string
 	limit    int
+	files    map[string]audioCacheFile
 	queue    []audioCacheDownload
 	pending  map[string]struct{}
 	running  bool
@@ -84,6 +86,7 @@ func newAudioCache(dir string, limit int) (*audioCache, error) {
 	c := &audioCache{
 		dir:      dir,
 		limit:    validAudioCacheLimit(limit),
+		files:    make(map[string]audioCacheFile),
 		pending:  make(map[string]struct{}),
 		download: downloadAudio,
 		fetch: func(ctx context.Context, streamURL, cacheDir string) (string, error) {
@@ -91,8 +94,10 @@ func newAudioCache(dir string, limit int) (*audioCache, error) {
 		},
 	}
 	c.mu.Lock()
-	c.trimLocked("")
+	c.scanLocked()
+	evicted := c.trimLocked("")
 	c.mu.Unlock()
+	c.removeFiles(evicted)
 	return c, nil
 }
 
@@ -119,8 +124,9 @@ func (c *audioCache) setLimit(limit int) {
 	if c.limit == 0 && c.cancel != nil {
 		c.cancel()
 	}
-	c.trimLocked("")
+	evicted := c.trimLocked("")
 	c.mu.Unlock()
+	c.removeFiles(evicted)
 }
 
 // warmable reports whether the cache keeps enough tracks for one downloaded
@@ -141,17 +147,22 @@ func (c *audioCache) get(videoID string) (string, bool) {
 		return "", false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.limit == 0 {
+		c.mu.Unlock()
 		return "", false
 	}
-	path := c.findLocked(videoID)
-	if path == "" {
+	file, ok := c.findLocked(videoID)
+	if !ok {
+		c.mu.Unlock()
 		return "", false
 	}
 	now := time.Now()
-	_ = os.Chtimes(path, now, now)
-	return path, true
+	file.used = now
+	c.files[file.key] = file
+	c.mu.Unlock()
+	// Touching the file keeps its least-recently-used order across restarts.
+	_ = os.Chtimes(file.path, now, now)
+	return file.path, true
 }
 
 // enqueue downloads videoID in the background with yt-dlp unless it is
@@ -176,7 +187,10 @@ func (c *audioCache) enqueueDownload(download audioCacheDownload) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.limit == 0 || c.findLocked(download.videoID) != "" {
+	if c.closed || c.limit == 0 {
+		return
+	}
+	if _, cached := c.findLocked(download.videoID); cached {
 		return
 	}
 	if _, exists := c.pending[download.videoID]; exists {
@@ -238,14 +252,18 @@ func (c *audioCache) drain() {
 			cancel()
 			c.mu.Lock()
 			c.cancel = nil
+			var evicted []string
 			if err == nil && c.limit > 0 {
-				if installErr := c.installLocked(download.videoID, temp); installErr != nil {
+				var installErr error
+				evicted, installErr = c.installLocked(download.videoID, temp)
+				if installErr != nil {
 					log.Printf("caching audio video_id=%s: %v", download.videoID, installErr)
 				}
 			} else if err != nil && !cancelled {
 				log.Printf("caching audio video_id=%s: %v", download.videoID, err)
 			}
 			c.mu.Unlock()
+			c.removeFiles(evicted)
 			if temp != "" {
 				_ = os.RemoveAll(filepath.Dir(temp))
 			}
@@ -267,73 +285,79 @@ func (c *audioCache) downloadQueued(ctx context.Context, download audioCacheDown
 	return c.download(ctx, download.videoID, c.dir, download.cookie)
 }
 
-// installLocked moves a completed temporary download into the cache and
-// evicts the least recently used files until the limit is met.
-func (c *audioCache) installLocked(videoID, temp string) error {
+// installLocked moves a completed temporary download into the cache and drops
+// the entries over the limit from the index. It returns the paths to delete;
+// the caller releases c.mu before deleting them. The caller holds c.mu.
+func (c *audioCache) installLocked(videoID, temp string) ([]string, error) {
 	if temp == "" {
-		return errors.New("yt-dlp returned no audio file")
+		return nil, errors.New("yt-dlp returned no audio file")
 	}
-	if c.findLocked(videoID) != "" {
-		return nil
+	key := audioCacheKey(videoID)
+	if _, cached := c.files[key]; cached {
+		return nil, nil
 	}
 	ext := strings.ToLower(filepath.Ext(temp))
 	if !audioCacheExtension(ext) {
-		return fmt.Errorf("yt-dlp returned an unsupported audio file %q", ext)
+		return nil, fmt.Errorf("yt-dlp returned an unsupported audio file %q", ext)
 	}
 	if err := os.Chmod(temp, 0o600); err != nil {
-		return fmt.Errorf("secure audio file: %w", err)
+		return nil, fmt.Errorf("secure audio file: %w", err)
 	}
 	now := time.Now()
 	if err := os.Chtimes(temp, now, now); err != nil {
-		return fmt.Errorf("mark audio as recently used: %w", err)
+		return nil, fmt.Errorf("mark audio as recently used: %w", err)
 	}
-	c.trimLocked("")
-	final := filepath.Join(c.dir, audioCacheKey(videoID)+ext)
+	final := filepath.Join(c.dir, key+ext)
 	if err := os.Rename(temp, final); err != nil {
-		return fmt.Errorf("store audio file: %w", err)
+		return nil, fmt.Errorf("store audio file: %w", err)
 	}
-	c.trimLocked(audioCacheKey(videoID))
-	return nil
+	c.files[key] = audioCacheFile{key: key, path: final, used: now}
+	return c.trimLocked(key), nil
 }
 
-// findLocked returns the audio file for videoID. The caller holds c.mu.
-func (c *audioCache) findLocked(videoID string) string {
-	entries, err := os.ReadDir(c.dir)
-	if err != nil {
-		return ""
-	}
-	prefix := audioCacheKey(videoID) + "."
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) || !audioCacheExtension(filepath.Ext(entry.Name())) {
-			continue
-		}
-		return filepath.Join(c.dir, entry.Name())
-	}
-	return ""
+// findLocked returns the cache entry for videoID from the in-memory index. The
+// caller holds c.mu.
+func (c *audioCache) findLocked(videoID string) (audioCacheFile, bool) {
+	file, cached := c.files[audioCacheKey(videoID)]
+	return file, cached
 }
 
-// trimLocked evicts the least-recently-used files until the cache is under
-// its limit, except for keep. The caller holds c.mu.
-func (c *audioCache) trimLocked(keep string) {
-	for {
-		files := c.filesLocked()
-		if len(files) <= c.limit {
-			return
+// trimLocked drops the least-recently-used entries from the index until the
+// cache is within its limit, except for keep, and returns their paths. It
+// updates only the index, so the caller can delete the paths after releasing
+// c.mu. The caller holds c.mu.
+func (c *audioCache) trimLocked(keep string) []string {
+	excess := len(c.files) - c.limit
+	if excess <= 0 {
+		return nil
+	}
+	candidates := make([]audioCacheFile, 0, len(c.files))
+	for _, file := range c.files {
+		if file.key != keep {
+			candidates = append(candidates, file)
 		}
-		oldest := -1
-		for i := range files {
-			if files[i].key == keep {
-				continue
-			}
-			if oldest < 0 || files[i].used.Before(files[oldest].used) {
-				oldest = i
-			}
-		}
-		if oldest < 0 {
-			return
-		}
-		if err := os.Remove(files[oldest].path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	slices.SortFunc(candidates, func(a, b audioCacheFile) int {
+		return a.used.Compare(b.used)
+	})
+	evicted := make([]string, 0, min(excess, len(candidates)))
+	for _, file := range candidates[:min(excess, len(candidates))] {
+		delete(c.files, file.key)
+		evicted = append(evicted, file.path)
+	}
+	return evicted
+}
+
+// removeFiles deletes evicted files. It runs without c.mu held, so a large
+// eviction never blocks lookups or the UI's warmable check, and one file that
+// cannot be removed does not stop the rest.
+func (c *audioCache) removeFiles(paths []string) {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("evicting cached audio %s: %v", path, err)
 		}
 	}
 }
@@ -344,18 +368,16 @@ type audioCacheFile struct {
 	used time.Time
 }
 
-func (c *audioCache) filesLocked() []audioCacheFile {
+// scanLocked builds the in-memory index from the cache directory. It runs once
+// when the cache is created, so later lookups and evictions need no directory
+// scan. The caller holds c.mu.
+func (c *audioCache) scanLocked() {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
-		return nil
+		return
 	}
-	files := make([]audioCacheFile, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !audioCacheExtension(filepath.Ext(entry.Name())) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
 			continue
 		}
 		key, _, ok := strings.Cut(entry.Name(), ".")
@@ -365,7 +387,19 @@ func (c *audioCache) filesLocked() []audioCacheFile {
 		if _, err := hex.DecodeString(key); err != nil {
 			continue
 		}
-		files = append(files, audioCacheFile{key: key, path: filepath.Join(c.dir, entry.Name()), used: info.ModTime()})
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		c.files[key] = audioCacheFile{key: key, path: filepath.Join(c.dir, entry.Name()), used: info.ModTime()}
+	}
+}
+
+// filesLocked returns the indexed cache files. The caller holds c.mu.
+func (c *audioCache) filesLocked() []audioCacheFile {
+	files := make([]audioCacheFile, 0, len(c.files))
+	for _, file := range c.files {
+		files = append(files, file)
 	}
 	return files
 }

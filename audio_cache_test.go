@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -59,7 +61,7 @@ func TestAudioCacheReturnsHitsAndEvictsLeastRecentlyUsed(t *testing.T) {
 	if _, ok := cache.get("a"); !ok {
 		t.Error("a recently replayed track was evicted")
 	}
-	if got := len(cache.filesLocked()); got != 5 {
+	if got := cachedFileCount(cache); got != 5 {
 		t.Errorf("cache has %d files, want 5", got)
 	}
 }
@@ -113,7 +115,7 @@ func TestAudioCacheDisablesAndClearsAtZero(t *testing.T) {
 	}
 	installTestAudio(t, cache, "cached")
 	cache.setLimit(0)
-	if got := len(cache.filesLocked()); got != 0 {
+	if got := cachedFileCount(cache); got != 0 {
 		t.Fatalf("turning the cache off left %d files", got)
 	}
 	if _, ok := cache.get("cached"); ok {
@@ -150,11 +152,12 @@ func TestAudioCacheTreatsCompletedDownloadAsMostRecentlyUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache.mu.Lock()
-	err = cache.installLocked("downloaded", temp)
+	evicted, err := cache.installLocked("downloaded", temp)
 	cache.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
+	cache.removeFiles(evicted)
 	if _, ok := cache.get("downloaded"); !ok {
 		t.Fatal("the newly completed download was treated as least recently used")
 	}
@@ -202,7 +205,7 @@ func TestAudioCacheEnqueueDownloadsOnceInBackground(t *testing.T) {
 		_, ok := cache.get("track")
 		return ok
 	})
-	if got := len(cache.filesLocked()); got != 1 {
+	if got := cachedFileCount(cache); got != 1 {
 		t.Errorf("one track was queued more than once: %d files", got)
 	}
 	for _, entry := range mustReadDir(t, cache.dir) {
@@ -231,7 +234,7 @@ func TestTurningAudioCacheOffCancelsTheActiveDownload(t *testing.T) {
 		defer cache.mu.Unlock()
 		return len(cache.pending) == 0
 	})
-	if got := len(cache.filesLocked()); got != 0 {
+	if got := cachedFileCount(cache); got != 0 {
 		t.Errorf("turning the cache off stored %d files", got)
 	}
 }
@@ -306,11 +309,19 @@ func installTestAudio(t *testing.T, cache *audioCache, id string) {
 		t.Fatal(err)
 	}
 	cache.mu.Lock()
-	err := cache.installLocked(id, path)
+	evicted, err := cache.installLocked(id, path)
 	cache.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}
+	cache.removeFiles(evicted)
+}
+
+// cachedFileCount reports the number of indexed files under the cache lock.
+func cachedFileCount(cache *audioCache) int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return len(cache.filesLocked())
 }
 
 func mustReadDir(t *testing.T, dir string) []os.DirEntry {
@@ -530,5 +541,189 @@ func TestAudioCacheDiscardsAFailedStreamDownload(t *testing.T) {
 		if entry.IsDir() {
 			t.Errorf("temporary download directory was left behind: %s", entry.Name())
 		}
+	}
+}
+
+// seedAudioCache writes count complete cache files with distinct modification
+// times, so lookups and eviction run against a realistic directory without
+// going through the download path.
+func seedAudioCache(tb testing.TB, dir string, count int) []string {
+	tb.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		tb.Fatal(err)
+	}
+	ids := make([]string, count)
+	for i := range count {
+		id := fmt.Sprintf("video-%d", i)
+		ids[i] = id
+		path := filepath.Join(dir, audioCacheKey(id)+".webm")
+		if err := os.WriteFile(path, []byte("audio"), 0o600); err != nil {
+			tb.Fatal(err)
+		}
+		used := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(path, used, used); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	return ids
+}
+
+// BenchmarkAudioCacheLookup measures a hit and a miss against caches of 100 and
+// 500 files, the sizes the audit used.
+func BenchmarkAudioCacheLookup(b *testing.B) {
+	for _, size := range []int{100, 500} {
+		b.Run(fmt.Sprintf("files=%d/hit", size), func(b *testing.B) {
+			dir := filepath.Join(b.TempDir(), "audio")
+			ids := seedAudioCache(b, dir, size)
+			cache, err := newAudioCache(dir, size)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, ok := cache.get(ids[size/2]); !ok {
+					b.Fatal("cache miss")
+				}
+			}
+		})
+		b.Run(fmt.Sprintf("files=%d/miss", size), func(b *testing.B) {
+			dir := filepath.Join(b.TempDir(), "audio")
+			seedAudioCache(b, dir, size)
+			cache, err := newAudioCache(dir, size)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, ok := cache.get("absent"); ok {
+					b.Fatal("unexpected cache hit")
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkAudioCacheTrimToTen measures applying a smaller limit, which evicts
+// every file over the new limit. Each iteration indexes a fresh directory.
+func BenchmarkAudioCacheTrimToTen(b *testing.B) {
+	for _, size := range []int{100, 500} {
+		b.Run(fmt.Sprintf("files=%d", size), func(b *testing.B) {
+			root := b.TempDir()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				dir, err := os.MkdirTemp(root, "audio-")
+				if err != nil {
+					b.Fatal(err)
+				}
+				seedAudioCache(b, dir, size)
+				cache, err := newAudioCache(dir, size)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				cache.setLimit(10)
+				b.StopTimer()
+				cache.close()
+				if err := os.RemoveAll(dir); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// Concurrent lookups, enqueues, and limit changes must stay race-free while the
+// worker installs and evicts files. Run with -race.
+func TestAudioCacheConcurrentAccessIsRaceFree(t *testing.T) {
+	cache, err := newAudioCache(t.TempDir(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.download = func(_ context.Context, id, dir, _ string) (string, error) {
+		tempDir, err := os.MkdirTemp(dir, ".test-audio-")
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(tempDir, "audio.webm")
+		if err := os.WriteFile(path, []byte(id), 0o600); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 40 {
+				id := fmt.Sprintf("video-%d-%d", i, j)
+				cache.get(id)
+				cache.enqueue(id, "")
+				if j%10 == 0 {
+					cache.setLimit(10 + j%10)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	cache.close()
+	if files := mustReadDir(t, cache.dir); len(files) > 22 {
+		t.Errorf("cache kept %d files after concurrent use", len(files))
+	}
+}
+
+// A cache scaled to hundreds of files must still find and evict tracks in one
+// pass, not one directory scan per file.
+func TestAudioCacheScalesToHundredsOfFiles(t *testing.T) {
+	for _, size := range []int{100, 500} {
+		t.Run(fmt.Sprintf("files=%d", size), func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "audio")
+			ids := seedAudioCache(t, dir, size)
+			cache, err := newAudioCache(dir, size)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := cache.get(ids[size-1]); !ok {
+				t.Fatal("a track in a large cache was not found")
+			}
+			cache.setLimit(10)
+			if got := cachedFileCount(cache); got != 10 {
+				t.Fatalf("cache holds %d indexed files after trimming to 10", got)
+			}
+			if files := mustReadDir(t, dir); len(files) != 10 {
+				t.Fatalf("cache directory holds %d files after trimming to 10", len(files))
+			}
+		})
+	}
+}
+
+// A single entry that cannot be removed must not stop the rest of an eviction,
+// so the cache cannot stay over its limit because of one bad file.
+func TestAudioCacheEvictionContinuesPastARemovalFailure(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "audio")
+	seedAudioCache(t, dir, 5)
+	cache, err := newAudioCache(dir, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// os.Remove cannot delete a non-empty directory. Give it the oldest
+	// timestamp so it is chosen first, then check the files after it go too.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.MkdirAll(filepath.Join(blocker, "child"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache.mu.Lock()
+	cache.files["blocker"] = audioCacheFile{key: "blocker", path: blocker, used: time.Unix(0, 0)}
+	cache.mu.Unlock()
+	cache.setLimit(3)
+	if got := cachedFileCount(cache); got != 3 {
+		t.Errorf("cache holds %d indexed files after a failed removal", got)
+	}
+	if files := mustReadDir(t, dir); len(files) != 3 {
+		t.Errorf("cache directory holds %d files after a failed removal", len(files))
 	}
 }
