@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -316,4 +320,215 @@ func mustReadDir(t *testing.T, dir string) []os.DirEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+// fakeTransport answers HTTP requests without a network, so the tests below
+// are deterministic.
+type fakeTransport func(*http.Request) (*http.Response, error)
+
+func (f fakeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func fakeAudioResponse(status int, contentType string, body []byte) *http.Response {
+	return &http.Response{
+		StatusCode:    status,
+		Status:        http.StatusText(status),
+		Header:        http.Header{"Content-Type": {contentType}},
+		ContentLength: int64(len(body)),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+	}
+}
+
+func TestDownloadAudioURLSavesACompleteStream(t *testing.T) {
+	body := []byte("resolved audio bytes")
+	var sent *http.Request
+	client := &http.Client{Transport: fakeTransport(func(request *http.Request) (*http.Response, error) {
+		sent = request
+		return fakeAudioResponse(http.StatusOK, "audio/webm; codecs=\"opus\"", body), nil
+	})}
+	dir := t.TempDir()
+	path, err := downloadAudioURL(context.Background(), client, "https://media.test/audio", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The direct URL is signed, so the cache sends no cookie of its own, only
+	// a browser User-Agent, which YouTube's media servers expect.
+	if cookie := sent.Header.Get("Cookie"); cookie != "" {
+		t.Errorf("download sent a cookie %q, want none for a signed URL", cookie)
+	}
+	if ua := sent.Header.Get("User-Agent"); ua == "" || ua == "Go-http-client/1.1" {
+		t.Errorf("download User-Agent = %q, want a browser User-Agent", ua)
+	}
+	if filepath.Dir(path) == dir || !strings.HasPrefix(filepath.Dir(path), dir+string(filepath.Separator)) {
+		t.Errorf("download %q is not inside a temporary directory under %q", path, dir)
+	}
+	if ext := filepath.Ext(path); ext != ".webm" {
+		t.Errorf("downloaded audio extension = %q, want .webm from the media type", ext)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("downloaded audio = %q, want %q", got, body)
+	}
+}
+
+// A stopped stream or an expired URL must not leave a usable file, and must
+// not leave a temporary directory behind.
+func TestDownloadAudioURLRejectsIncompleteStreams(t *testing.T) {
+	readErr := errors.New("connection reset")
+	cases := []struct {
+		name    string
+		ctx     context.Context
+		client  *http.Client
+		wantErr bool
+	}{
+		{
+			name: "expired URL",
+			ctx:  context.Background(),
+			client: &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
+				return fakeAudioResponse(http.StatusForbidden, "text/plain", []byte("expired")), nil
+			})},
+			wantErr: true,
+		},
+		{
+			name: "fewer bytes than declared",
+			ctx:  context.Background(),
+			client: &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
+				short := fakeAudioResponse(http.StatusOK, "audio/webm", []byte("partial"))
+				short.ContentLength = 1000
+				return short, nil
+			})},
+			wantErr: true,
+		},
+		{
+			name: "stream cut off",
+			ctx:  context.Background(),
+			client: &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
+				response := fakeAudioResponse(http.StatusOK, "audio/webm", nil)
+				response.ContentLength = -1
+				response.Body = io.NopCloser(&failingBody{err: readErr})
+				return response, nil
+			})},
+			wantErr: true,
+		},
+		{
+			name: "cancelled",
+			// The caller cancels the download when playback moves on.
+			ctx: cancelledContext(),
+			client: &http.Client{Transport: fakeTransport(func(request *http.Request) (*http.Response, error) {
+				<-request.Context().Done()
+				return nil, request.Context().Err()
+			})},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path, err := downloadAudioURL(tc.ctx, tc.client, "https://media.test/audio", dir)
+			if tc.wantErr && err == nil {
+				t.Fatalf("incomplete download returned %q with no error", path)
+			}
+			if path != "" {
+				t.Errorf("incomplete download returned a path %q", path)
+			}
+			if entries := mustReadDir(t, dir); len(entries) != 0 {
+				t.Errorf("incomplete download left %d entries behind: %v", len(entries), entries)
+			}
+		})
+	}
+}
+
+func cancelledContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}
+
+// failingBody serves some bytes and then fails, like a connection that drops
+// partway through a stream.
+type failingBody struct {
+	served bool
+	err    error
+}
+
+func (b *failingBody) Read(p []byte) (int, error) {
+	if !b.served {
+		b.served = true
+		return copy(p, "partial"), nil
+	}
+	return 0, b.err
+}
+
+// Starting a track already resolved its direct URL, so the cache must use
+// that URL instead of resolving the same track through yt-dlp a second time.
+func TestAudioCacheCachesTheResolvedStreamWithoutResolvingAgain(t *testing.T) {
+	cache, err := newAudioCache(t.TempDir(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.download = func(context.Context, string, string, string) (string, error) {
+		t.Error("caching the current track resolved it through yt-dlp again")
+		return "", errors.New("unexpected yt-dlp run")
+	}
+	body := []byte("resolved audio bytes")
+	cache.fetch = func(ctx context.Context, streamURL, cacheDir string) (string, error) {
+		client := &http.Client{Transport: fakeTransport(func(*http.Request) (*http.Response, error) {
+			return fakeAudioResponse(http.StatusOK, "audio/mp4", body), nil
+		})}
+		return downloadAudioURL(ctx, client, streamURL, cacheDir)
+	}
+	cache.enqueueStream("track", "https://media.test/audio")
+	waitFor(t, func() bool {
+		_, ok := cache.get("track")
+		return ok
+	})
+	path, ok := cache.get("track")
+	if !ok {
+		t.Fatal("the resolved stream was not cached")
+	}
+	if ext := filepath.Ext(path); ext != ".m4a" {
+		t.Errorf("cached audio extension = %q, want .m4a from the media type", ext)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("cached audio = %q, want %q", got, body)
+	}
+	for _, entry := range mustReadDir(t, cache.dir) {
+		if entry.IsDir() {
+			t.Errorf("temporary download directory was left behind: %s", entry.Name())
+		}
+	}
+}
+
+// A cache write is best effort: when it fails, playback keeps going and the
+// cache stays usable for the next track.
+func TestAudioCacheDiscardsAFailedStreamDownload(t *testing.T) {
+	cache, err := newAudioCache(t.TempDir(), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.fetch = func(context.Context, string, string) (string, error) {
+		return "", errors.New("signed URL expired")
+	}
+	cache.enqueueStream("expired", "https://media.test/expired")
+	waitFor(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return len(cache.pending) == 0
+	})
+	if _, ok := cache.get("expired"); ok {
+		t.Error("a failed download became a cache hit")
+	}
+	for _, entry := range mustReadDir(t, cache.dir) {
+		if entry.IsDir() {
+			t.Errorf("temporary download directory was left behind: %s", entry.Name())
+		}
+	}
 }

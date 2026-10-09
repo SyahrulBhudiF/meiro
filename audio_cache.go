@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -58,11 +60,16 @@ type audioCache struct {
 	cancel   context.CancelFunc
 	worker   sync.WaitGroup
 	download func(context.Context, string, string, string) (string, error)
+	fetch    func(context.Context, string, string) (string, error)
 }
 
 type audioCacheDownload struct {
 	videoID string
 	cookie  string
+	// streamURL is a direct audio URL the app already resolved for playback.
+	// When it is set, the cache downloads it instead of resolving the track
+	// again through yt-dlp. Warm-next tracks have none and take the yt-dlp path.
+	streamURL string
 }
 
 // newAudioCache prepares a private directory and removes any files over the
@@ -79,6 +86,9 @@ func newAudioCache(dir string, limit int) (*audioCache, error) {
 		limit:    validAudioCacheLimit(limit),
 		pending:  make(map[string]struct{}),
 		download: downloadAudio,
+		fetch: func(ctx context.Context, streamURL, cacheDir string) (string, error) {
+			return downloadAudioURL(ctx, http.DefaultClient, streamURL, cacheDir)
+		},
 	}
 	c.mu.Lock()
 	c.trimLocked("")
@@ -144,22 +154,36 @@ func (c *audioCache) get(videoID string) (string, bool) {
 	return path, true
 }
 
-// enqueue downloads videoID in the background unless it is already cached or
-// queued. One worker keeps disk use within the configured item limit.
+// enqueue downloads videoID in the background with yt-dlp unless it is
+// already cached or queued. One worker keeps disk use within the configured
+// item limit.
 func (c *audioCache) enqueue(videoID, cookie string) {
-	if c == nil || videoID == "" {
+	c.enqueueDownload(audioCacheDownload{videoID: videoID, cookie: cookie})
+}
+
+// enqueueStream caches a track whose direct audio URL the app resolved while
+// starting playback. The URL is downloaded as it is, so starting a track does
+// not resolve the same track a second time through yt-dlp.
+func (c *audioCache) enqueueStream(videoID, streamURL string) {
+	c.enqueueDownload(audioCacheDownload{videoID: videoID, streamURL: streamURL})
+}
+
+// enqueueDownload adds one download to the queue unless the track is already
+// cached or queued, and starts the worker if it is idle.
+func (c *audioCache) enqueueDownload(download audioCacheDownload) {
+	if c == nil || download.videoID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.limit == 0 || c.findLocked(videoID) != "" {
+	if c.closed || c.limit == 0 || c.findLocked(download.videoID) != "" {
 		return
 	}
-	if _, exists := c.pending[videoID]; exists {
+	if _, exists := c.pending[download.videoID]; exists {
 		return
 	}
-	c.pending[videoID] = struct{}{}
-	c.queue = append(c.queue, audioCacheDownload{videoID: videoID, cookie: cookie})
+	c.pending[download.videoID] = struct{}{}
+	c.queue = append(c.queue, download)
 	if c.running {
 		return
 	}
@@ -209,7 +233,7 @@ func (c *audioCache) drain() {
 		c.mu.Unlock()
 
 		if limit > 0 {
-			temp, err := c.download(ctx, download.videoID, c.dir, download.cookie)
+			temp, err := c.downloadQueued(ctx, download)
 			cancelled := ctx.Err() != nil
 			cancel()
 			c.mu.Lock()
@@ -231,6 +255,16 @@ func (c *audioCache) drain() {
 		delete(c.pending, download.videoID)
 		c.mu.Unlock()
 	}
+}
+
+// downloadQueued fetches the audio for one queued download. A track the app
+// already resolved streams from its direct URL; a warm-next track has none and
+// is resolved with yt-dlp.
+func (c *audioCache) downloadQueued(ctx context.Context, download audioCacheDownload) (string, error) {
+	if download.streamURL != "" {
+		return c.fetch(ctx, download.streamURL, c.dir)
+	}
+	return c.download(ctx, download.videoID, c.dir, download.cookie)
 }
 
 // installLocked moves a completed temporary download into the cache and
@@ -397,6 +431,99 @@ func downloadAudio(ctx context.Context, videoID, cacheDir, cookie string) (strin
 	}
 	_ = os.RemoveAll(tempDir)
 	return "", errors.New("yt-dlp finished without an audio file")
+}
+
+// audioStreamUserAgent is what the cache sends when it fetches an audio
+// stream. YouTube's media servers answer some requests without a browser
+// User-Agent with an error, the same reason the player tells ffmpeg to send
+// one. The URL itself is already signed, so no cookie is needed.
+const audioStreamUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+// downloadAudioURL saves an audio stream the app already resolved for
+// playback into a temporary directory inside the cache. The direct URL
+// carries its own authentication and expiry, so no second yt-dlp run is
+// needed. A download that ends early, or an expired URL that no longer
+// answers, is discarded: only a complete file is returned, so an interrupted
+// stream never becomes a cache hit. The caller atomically installs the file.
+func downloadAudioURL(ctx context.Context, client *http.Client, streamURL, cacheDir string) (string, error) {
+	if strings.TrimSpace(streamURL) == "" {
+		return "", errors.New("no resolved audio URL to cache")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("prepare audio download: %w", err)
+	}
+	request.Header.Set("User-Agent", audioStreamUserAgent)
+	response, err := client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("download audio: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		// A signed URL that has expired answers with an error; the track is
+		// already playing, so the cache just skips it.
+		return "", fmt.Errorf("download audio: unexpected status %s", response.Status)
+	}
+	tempDir, err := os.MkdirTemp(cacheDir, ".audio-*")
+	if err != nil {
+		return "", fmt.Errorf("prepare audio cache: %w", err)
+	}
+	path := filepath.Join(tempDir, "audio"+audioURLExtension(response.Header.Get("Content-Type")))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("prepare audio cache: %w", err)
+	}
+	written, copyErr := io.Copy(file, response.Body)
+	closeErr := file.Close()
+	if copyErr != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("download audio: %w", copyErr)
+	}
+	if closeErr != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("download audio: %w", closeErr)
+	}
+	// A stream cut short can end without an error, so the declared length is
+	// the only proof that every byte arrived.
+	if response.ContentLength >= 0 && written != response.ContentLength {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("download audio: got %d of %d bytes", written, response.ContentLength)
+	}
+	if written == 0 {
+		_ = os.RemoveAll(tempDir)
+		return "", errors.New("download audio: the response was empty")
+	}
+	return path, nil
+}
+
+// audioURLExtension picks the file extension for a downloaded audio stream
+// from the media type YouTube reports for it. ffmpeg reads a file by its
+// contents, so the extension only has to name a container the cache keeps.
+func audioURLExtension(contentType string) string {
+	mediaType, _, _ := strings.Cut(contentType, ";")
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "audio/webm", "video/webm":
+		return ".webm"
+	case "audio/mp4", "video/mp4":
+		return ".m4a"
+	case "audio/ogg", "application/ogg":
+		return ".ogg"
+	case "audio/opus":
+		return ".opus"
+	case "audio/aac", "audio/aacp":
+		return ".aac"
+	case "audio/flac", "audio/x-flac":
+		return ".flac"
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return ".wav"
+	case "audio/mpeg":
+		return ".mp3"
+	default:
+		// YouTube Music serves most audio as Opus in WebM, which is the safe
+		// fallback when a media server reports no useful type.
+		return ".webm"
+	}
 }
 
 // audioCacheDownloadArgs asks yt-dlp for the track's own audio stream. It

@@ -315,8 +315,10 @@ func (a *app) stream(item youtube.MusicItem) {
 			}
 			log.Printf("playback: audio started video_id=%s source=%s duration=%s", item.VideoID, source, total)
 			if !fromCache {
-				cache, videoID, cookie := a.currentAudioCache(), item.VideoID, cookie
-				a.run(func() { cache.enqueue(videoID, cookie) })
+				// The direct URL is already in hand, so the cache downloads it
+				// as it is instead of resolving the same track again.
+				cache, videoID, streamURL := a.currentAudioCache(), item.VideoID, streamURL
+				a.run(func() { cache.enqueueStream(videoID, streamURL) })
 			}
 			a.warmNext()
 			a.syncSystemMedia()
