@@ -404,7 +404,7 @@ func (a *app) queueView(c *ui.Context) {
 			})
 			return
 		}
-		a.songRow(c, a.queue[index], a.queue, songOptions{directQueue: true, source: a.queueSource})
+		a.songRow(c, a.queue[index], a.queue, songOptions{directQueue: true, source: a.queueSource, fetchArtwork: true})
 	}).Grow(1).Padding(0, 8, 16)
 }
 
@@ -429,7 +429,7 @@ func (a *app) relatedView(c *ui.Context) {
 			return a.related.items[i].Title
 		}
 		ui.List(c, &a.relatedList, len(a.related.items), func(i int) {
-			a.songRow(c, a.related.items[i], a.related.items, songOptions{directQueue: true, source: "Related"})
+			a.songRow(c, a.related.items[i], a.related.items, songOptions{directQueue: true, source: "Related", fetchArtwork: true})
 		}).Grow(1).Padding(0, 8, 16)
 	}
 }

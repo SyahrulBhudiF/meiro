@@ -537,13 +537,23 @@ func TestUpNextShowsAutoplayStateAndRecommendationSection(t *testing.T) {
 	a := newTestApp()
 	a.current = youtube.MusicItem{VideoID: "current", Title: "Current song"}
 	a.queue = []youtube.MusicItem{
-		{VideoID: "current", Title: "Current song"},
-		{VideoID: "chosen-next", Title: "Chosen next"},
-		{VideoID: "recommended", Title: "Recommended song"},
+		{VideoID: "current", Title: "Current song", Thumbnail: "https://art.test/queue/current"},
+		{VideoID: "chosen-next", Title: "Chosen next", Thumbnail: "https://art.test/queue/next"},
+		{VideoID: "recommended", Title: "Recommended song", Thumbnail: "https://art.test/queue/recommended"},
 	}
 	a.index, a.recommendationStart, a.queueSource = 1, 2, "My playlist"
 	a.location, a.npOpen = "/home", true
+	requested := make(map[string]bool)
+	a.thumbs.synth = func(url string, _ int) *ui.Bitmap {
+		requested[url] = true
+		return ui.NewBitmap(image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	}
 	tt := ui.NewTester(a.view, 1180, 760)
+	for _, item := range a.queue {
+		if !requested[item.Thumbnail] {
+			t.Errorf("the queue row %q did not request its artwork: %v", item.Title, requested)
+		}
+	}
 	for _, label := range []string{"Playing from", "My playlist", "Auto-play", "Add similar music when this queue ends.", "Recommended", "Recommended song"} {
 		if !tt.HasText(label) {
 			t.Errorf("Up next panel is missing %q: %q", label, tt.Texts())
@@ -565,12 +575,20 @@ func TestRelatedTabShowsRelatedTracks(t *testing.T) {
 	a.current = youtube.MusicItem{VideoID: "current", Title: "Current song"}
 	a.related = relatedState{
 		videoID: "current",
-		items:   []youtube.MusicItem{{VideoID: "related", Title: "Related song", Kind: "track"}},
+		items:   []youtube.MusicItem{{VideoID: "related", Title: "Related song", Kind: "track", Thumbnail: "https://art.test/related/0"}},
 	}
 	a.location, a.npOpen, a.npTab = "/home", true, 2
+	requested := make(map[string]bool)
+	a.thumbs.synth = func(url string, _ int) *ui.Bitmap {
+		requested[url] = true
+		return ui.NewBitmap(image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	}
 	tt := ui.NewTester(a.view, 1180, 760)
 	if !tt.HasText("Related") || !tt.HasText("Related song") {
 		t.Fatalf("related tab did not show its tracks: %q", tt.Texts())
+	}
+	if !requested["https://art.test/related/0"] {
+		t.Errorf("the related row did not request its artwork: %v", requested)
 	}
 }
 
