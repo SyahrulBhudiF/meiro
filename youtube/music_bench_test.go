@@ -37,3 +37,30 @@ func BenchmarkNewBrowseResult(b *testing.B) {
 		c.newBrowseResult(raw)
 	}
 }
+
+// benchUpNextResponse is a playback queue: one panel of sixty entries, each
+// naming its track, artwork, and the mix it belongs to.
+func benchUpNextResponse() []byte {
+	var b strings.Builder
+	b.WriteString(`{"contents":{"playlistPanelRenderer":{"playlistId":"RDAMVMbench","contents":[`)
+	for i := 0; i < 60; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"playlistPanelVideoRenderer":{"videoId":"v%[1]d","title":{"runs":[{"text":"Track %[1]d"}]},"longBylineText":{"runs":[{"text":"Artist %[1]d"}]},"thumbnail":{"thumbnails":[{"url":"https://x/v%[1]d=w60-h60","width":60},{"url":"https://x/v%[1]d=w544-h544","width":544}]},"lengthText":{"runs":[{"text":"3:45"}]},"navigationEndpoint":{"watchEndpoint":{"videoId":"v%[1]d","playlistId":"RDAMVMbench"}},"menu":{"menuRenderer":{"items":[{"menuServiceItemRenderer":{"text":{"runs":[{"text":"Save"}]},"serviceEndpoint":{"queueAddEndpoint":{"queueTarget":{"videoId":"v%[1]d"}}}}}]}}}}`, i)
+	}
+	b.WriteString(`],"continuations":[{"nextRadioContinuationData":{"continuation":"RADIO_MORE"},"nextContinuationData":{"continuation":"STANDARD_MORE"}}]}}}`)
+	return []byte(b.String())
+}
+
+// BenchmarkNewUpNextResult is the cost of reading a playback queue: one panel of
+// sixty entries.
+func BenchmarkNewUpNextResult(b *testing.B) {
+	raw := benchUpNextResponse()
+	c := NewClient(Options{APIKey: "k"})
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		c.newUpNextResult(raw)
+	}
+}

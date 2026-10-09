@@ -366,9 +366,9 @@ func TestSearchKeepsItsTopCardResult(t *testing.T) {
 }
 
 func TestTrackReadsArtistBrowseIDFromItsSubtitle(t *testing.T) {
-	var renderer map[string]any
-	if err := json.Unmarshal([]byte(`{"videoId":"track-1","flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"simpleText":"Track"}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Album","navigationEndpoint":{"browseEndpoint":{"browseId":"MPRalbum"}}},{"text":" • "},{"text":"Artist","navigationEndpoint":{"browseEndpoint":{"browseId":"UCartist"}}}]}}}]}`), &renderer); err != nil {
-		t.Fatal(err)
+	renderer, ok := decodeResponse([]byte(`{"videoId":"track-1","flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"simpleText":"Track"}}},{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Album","navigationEndpoint":{"browseEndpoint":{"browseId":"MPRalbum"}}},{"text":" • "},{"text":"Artist","navigationEndpoint":{"browseEndpoint":{"browseId":"UCartist"}}}]}}}]}`)).(*jsonObject)
+	if !ok {
+		t.Fatal("track renderer did not decode to an object")
 	}
 	item := parseMusicItem("track", renderer)
 	if item.BrowseID != "UCartist" {
@@ -737,19 +737,63 @@ func TestGetSearchSuggestionsParsesCompletionsInOrder(t *testing.T) {
 	}
 }
 
-func TestExtractMusicItemsKeepsASongListedTwice(t *testing.T) {
+func TestBrowsePartsKeepsASongListedTwice(t *testing.T) {
 	entry := func(setID string) string {
 		return `{"musicResponsiveListItemRenderer":{"playlistItemData":{"videoId":"V1","playlistSetVideoId":"` + setID + `"},` +
 			`"flexColumns":[{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Song"}]}}}]}}`
 	}
 	twice := []byte(`{"contents":[` + entry("S1") + `,` + entry("S2") + `]}`)
-	if got := extractMusicItems(decodeResponse(twice)); len(got) != 2 {
-		t.Errorf("a playlist holding a song twice gave %d items, want 2", len(got))
+	if items, _ := browseParts(decodeResponse(twice), false); len(items) != 2 {
+		t.Errorf("a playlist holding a song twice gave %d items, want 2", len(items))
 	}
 	// The same entry met twice, as a response may repeat one, stays one.
 	repeated := []byte(`{"contents":[` + entry("S1") + `,` + entry("S1") + `]}`)
-	if got := extractMusicItems(decodeResponse(repeated)); len(got) != 1 {
-		t.Errorf("a repeated entry gave %d items, want 1", len(got))
+	if items, _ := browseParts(decodeResponse(repeated), false); len(items) != 1 {
+		t.Errorf("a repeated entry gave %d items, want 1", len(items))
+	}
+}
+
+// TestParsersFollowDocumentOrder pins that a walk reads competing members in
+// the order the response listed them. Sorting keys instead would pick a
+// different ID, token, or thumbnail than the response intended.
+func TestParsersFollowDocumentOrder(t *testing.T) {
+	if got := navigationID(decodeResponse([]byte(`{"zzz":{"browseId":"FIRST"},"aaa":{"browseId":"SECOND"}}`))); got != "FIRST" {
+		t.Errorf("navigationID picked ID %q, want the first member's FIRST", got)
+	}
+	if got := continuationToken(decodeResponse([]byte(`{"zzz":{"continuation":"FIRST"},"aaa":{"continuation":"SECOND"}}`))); got != "FIRST" {
+		t.Errorf("continuationToken picked token %q, want the first member's FIRST", got)
+	}
+	if got := rendererThumbnail(decodeResponse([]byte(`{"zzz":{"thumbnails":[{"url":"https://x/first"}]},"aaa":{"thumbnails":[{"url":"https://x/second"}]}}`))); got != "https://x/first" {
+		t.Errorf("rendererThumbnail picked %q, want the first member's https://x/first", got)
+	}
+}
+
+// TestBrowsePartsReadsSectionsAndItemsInDocumentOrder checks that one walk
+// returns a page's items and sections in the order the response listed them,
+// and that a section carries the items it holds.
+func TestBrowsePartsReadsSectionsAndItemsInDocumentOrder(t *testing.T) {
+	raw := []byte(`{"contents":{"musicShelfRenderer":{"title":{"runs":[{"text":"Shelf"}]},"contents":[` +
+		`{"musicResponsiveListItemRenderer":{"videoId":"shelf-1","title":{"runs":[{"text":"Shelf one"}]}}},` +
+		`{"musicResponsiveListItemRenderer":{"videoId":"shelf-2","title":{"runs":[{"text":"Shelf two"}]}}}]},` +
+		`"musicCardShelfRenderer":{"title":{"runs":[{"text":"Card","navigationEndpoint":{"watchEndpoint":{"videoId":"card-1"}}}]},"subtitle":{"runs":[{"text":"Artist"}]}}}}`)
+	items, sections := browseParts(decodeResponse(raw), true)
+	gotItems := make([]string, 0, len(items))
+	for _, item := range items {
+		gotItems = append(gotItems, item.VideoID)
+	}
+	if want := []string{"shelf-1", "shelf-2", "card-1"}; !slices.Equal(gotItems, want) {
+		t.Errorf("items = %#v, want document order %#v", gotItems, want)
+	}
+	if len(sections) != 1 {
+		t.Fatalf("sections = %#v, want one", sections)
+	}
+	section := sections[0]
+	gotSection := make([]string, 0, len(section.Items))
+	for _, item := range section.Items {
+		gotSection = append(gotSection, item.VideoID)
+	}
+	if section.Kind != "musicShelfRenderer" || section.Title != "Shelf" || !slices.Equal(gotSection, []string{"shelf-1", "shelf-2"}) {
+		t.Errorf("section = %#v, want a musicShelfRenderer titled Shelf holding shelf-1 and shelf-2", section)
 	}
 }
 

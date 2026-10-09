@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -275,15 +274,16 @@ func (c *Client) GetAccountDetails(ctx context.Context) (*AccountDetails, error)
 		return nil, err
 	}
 	details := &AccountDetails{}
+	root := decodeResponse(raw)
 	// The account menu names the active account, its email, and its photo in
 	// one header renderer.
-	if header := findRenderer(raw, "activeAccountHeaderRenderer"); header != nil {
-		details.Name = rendererText(header["accountName"])
-		details.Email = rendererText(header["email"])
-		details.Thumbnail = rendererThumbnail(header["accountPhoto"])
+	if header := findRenderer(root, "activeAccountHeaderRenderer"); header != nil {
+		details.Name = rendererText(header.get("accountName"))
+		details.Email = rendererText(header.get("email"))
+		details.Thumbnail = rendererThumbnail(header.get("accountPhoto"))
 	}
 	// The header carries no channel ID; the menu's account list does.
-	for _, channel := range extractAccountChannels(raw) {
+	for _, channel := range extractAccountChannels(root) {
 		if !channel.Selected {
 			continue
 		}
@@ -308,7 +308,7 @@ func (c *Client) GetAccounts(ctx context.Context) (*AccountList, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AccountList{Items: extractAccountChannels(raw)}, nil
+	return &AccountList{Items: extractAccountChannels(decodeResponse(raw))}, nil
 }
 
 // GetUpNext fetches the read-only queue for a track. Set PlaylistID and
@@ -332,11 +332,12 @@ func (c *Client) GetUpNext(ctx context.Context, options UpNextOptions) (*BrowseR
 	if err != nil {
 		return nil, err
 	}
-	result := c.newUpNextResult(raw)
+	root := decodeResponse(raw)
+	result := upNextResult(root)
 	if options.Continuation != "" || result.QueuePlaylistID != "" {
 		return result, nil
 	}
-	playlistPayload := automixPlaylistPayload(raw)
+	playlistPayload := automixPlaylistPayload(root)
 	if playlistPayload == nil {
 		return result, nil
 	}
@@ -345,21 +346,26 @@ func (c *Client) GetUpNext(ctx context.Context, options UpNextOptions) (*BrowseR
 	if err != nil {
 		return nil, err
 	}
-	return c.newUpNextResult(raw), nil
+	return upNextResult(decodeResponse(raw)), nil
 }
 
+// newUpNextResult reads a /next response. The response is parsed once, and its
+// items, queue ID, and continuation are all read off that one tree.
 func (c *Client) newUpNextResult(raw json.RawMessage) *BrowseResult {
-	result := c.newBrowseResult(raw)
-	result.QueuePlaylistID = upNextPlaylistID(raw)
-	result.ContinuationToken = upNextContinuationToken(raw)
-	return result
+	return upNextResult(decodeResponse(raw))
 }
 
-func upNextPlaylistID(raw json.RawMessage) string {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return ""
+// upNextResult reads a decoded /next response.
+func upNextResult(root any) *BrowseResult {
+	items, sections := browseParts(root, true)
+	return &BrowseResult{
+		Items: items, Sections: sections,
+		ContinuationToken: upNextContinuationToken(root),
+		QueuePlaylistID:   upNextPlaylistID(root),
 	}
+}
+
+func upNextPlaylistID(root any) string {
 	var walk func(any) string
 	walk = func(value any) string {
 		switch node := value.(type) {
@@ -369,16 +375,16 @@ func upNextPlaylistID(raw json.RawMessage) string {
 					return id
 				}
 			}
-		case map[string]any:
+		case *jsonObject:
 			for _, key := range []string{"playlistPanelRenderer", "playlistPanelContinuation"} {
-				if panel, ok := node[key].(map[string]any); ok {
-					if id, ok := panel["playlistId"].(string); ok && id != "" {
+				if panel, ok := node.get(key).(*jsonObject); ok {
+					if id, ok := panel.get("playlistId").(string); ok && id != "" {
 						return id
 					}
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				if id := walk(node[key]); id != "" {
+			for _, member := range node.members {
+				if id := walk(member.value); id != "" {
 					return id
 				}
 			}
@@ -388,21 +394,17 @@ func upNextPlaylistID(raw json.RawMessage) string {
 	return walk(root)
 }
 
-func upNextContinuationToken(raw json.RawMessage) string {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return ""
-	}
-	tokenFromPanel := func(panel map[string]any) string {
-		if token, ok := panel["continuation"].(string); ok && token != "" {
+func upNextContinuationToken(root any) string {
+	tokenFromPanel := func(panel *jsonObject) string {
+		if token, ok := panel.get("continuation").(string); ok && token != "" {
 			return token
 		}
-		continuations, _ := panel["continuations"].([]any)
+		continuations, _ := panel.get("continuations").([]any)
 		for _, value := range continuations {
-			continuation, _ := value.(map[string]any)
+			continuation, _ := value.(*jsonObject)
 			for _, key := range []string{"nextRadioContinuationData", "nextContinuationData"} {
-				if data, ok := continuation[key].(map[string]any); ok {
-					if token, ok := data["continuation"].(string); ok && token != "" {
+				if data, ok := continuation.get(key).(*jsonObject); ok {
+					if token, ok := data.get("continuation").(string); ok && token != "" {
 						return token
 					}
 				}
@@ -419,16 +421,16 @@ func upNextContinuationToken(raw json.RawMessage) string {
 					return token
 				}
 			}
-		case map[string]any:
+		case *jsonObject:
 			for _, key := range []string{"playlistPanelRenderer", "playlistPanelContinuation"} {
-				if panel, ok := node[key].(map[string]any); ok {
+				if panel, ok := node.get(key).(*jsonObject); ok {
 					if token := tokenFromPanel(panel); token != "" {
 						return token
 					}
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				if token := walk(node[key]); token != "" {
+			for _, member := range node.members {
+				if token := walk(member.value); token != "" {
 					return token
 				}
 			}
@@ -438,11 +440,7 @@ func upNextContinuationToken(raw json.RawMessage) string {
 	return walk(root)
 }
 
-func automixPlaylistPayload(raw json.RawMessage) map[string]any {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return nil
-	}
+func automixPlaylistPayload(root any) map[string]any {
 	var walk func(any) map[string]any
 	walk = func(value any) map[string]any {
 		switch node := value.(type) {
@@ -452,21 +450,21 @@ func automixPlaylistPayload(raw json.RawMessage) map[string]any {
 					return payload
 				}
 			}
-		case map[string]any:
-			if preview, ok := node["automixPreviewVideoRenderer"].(map[string]any); ok {
-				content, _ := preview["content"].(map[string]any)
-				automix, _ := content["automixPlaylistVideoRenderer"].(map[string]any)
-				navigation, _ := automix["navigationEndpoint"].(map[string]any)
-				if payload, ok := navigation["watchPlaylistEndpoint"].(map[string]any); ok {
-					copy := make(map[string]any, len(payload))
-					for key, value := range payload {
-						copy[key] = value
+		case *jsonObject:
+			if preview, ok := node.get("automixPreviewVideoRenderer").(*jsonObject); ok {
+				content, _ := preview.get("content").(*jsonObject)
+				automix, _ := content.get("automixPlaylistVideoRenderer").(*jsonObject)
+				navigation, _ := automix.get("navigationEndpoint").(*jsonObject)
+				if endpoint, ok := navigation.get("watchPlaylistEndpoint").(*jsonObject); ok {
+					payload := make(map[string]any, len(endpoint.members))
+					for _, member := range endpoint.members {
+						payload[member.key] = member.value
 					}
-					return copy
+					return payload
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				if payload := walk(node[key]); payload != nil {
+			for _, member := range node.members {
+				if payload := walk(member.value); payload != nil {
 					return payload
 				}
 			}
@@ -513,17 +511,17 @@ func searchSuggestions(raw json.RawMessage) []string {
 			for _, child := range node {
 				walk(child)
 			}
-		case map[string]any:
-			if renderer, ok := node["searchSuggestionRenderer"].(map[string]any); ok {
-				if text := rendererText(renderer["suggestion"]); text != "" {
+		case *jsonObject:
+			if renderer, ok := node.get("searchSuggestionRenderer").(*jsonObject); ok {
+				if text := rendererText(renderer.get("suggestion")); text != "" {
 					if _, exists := seen[text]; !exists {
 						seen[text] = struct{}{}
 						suggestions = append(suggestions, text)
 					}
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				walk(node[key])
+			for _, member := range node.members {
+				walk(member.value)
 			}
 		}
 	}
@@ -539,9 +537,10 @@ func (c *Client) GetLyrics(ctx context.Context, videoID string) (*Lyrics, error)
 		return nil, err
 	}
 	lyrics := &Lyrics{}
-	if renderer := findRenderer(raw, "musicDescriptionShelfRenderer"); renderer != nil {
-		lyrics.Description = rendererText(renderer["description"])
-		lyrics.Footer = rendererText(renderer["footer"])
+	root := decodeResponse(raw)
+	if renderer := findRenderer(root, "musicDescriptionShelfRenderer"); renderer != nil {
+		lyrics.Description = rendererText(renderer.get("description"))
+		lyrics.Footer = rendererText(renderer.get("footer"))
 	}
 	return lyrics, nil
 }
@@ -568,18 +567,15 @@ func (c *Client) getTrackTab(ctx context.Context, videoID, pageType string) (jso
 	if err != nil {
 		return nil, err
 	}
-	browseID := musicTabBrowseID(raw, pageType)
+	root := decodeResponse(raw)
+	browseID := musicTabBrowseID(root, pageType)
 	if browseID == "" {
 		return nil, fmt.Errorf("youtube: track response has no %s tab", pageType)
 	}
 	return c.execute(ctx, "browse", map[string]any{"browseId": browseID})
 }
 
-func musicTabBrowseID(raw json.RawMessage, pageType string) string {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return ""
-	}
+func musicTabBrowseID(root any, pageType string) string {
 	var walk func(any, []any) string
 	walk = func(value any, parents []any) string {
 		switch node := value.(type) {
@@ -589,8 +585,8 @@ func musicTabBrowseID(raw json.RawMessage, pageType string) string {
 					return id
 				}
 			}
-		case map[string]any:
-			if node["pageType"] == pageType {
+		case *jsonObject:
+			if node.get("pageType") == pageType {
 				for index := len(parents) - 1; index >= 0; index-- {
 					if id := navigationID(parents[index]); id != "" {
 						return id
@@ -599,8 +595,8 @@ func musicTabBrowseID(raw json.RawMessage, pageType string) string {
 				return navigationID(node)
 			}
 			parents = append(parents, node)
-			for _, key := range sortedKeys(node) {
-				if id := walk(node[key], parents); id != "" {
+			for _, member := range node.members {
+				if id := walk(member.value, parents); id != "" {
 					return id
 				}
 			}
@@ -610,13 +606,9 @@ func musicTabBrowseID(raw json.RawMessage, pageType string) string {
 	return walk(root, nil)
 }
 
-func findRenderer(raw json.RawMessage, rendererName string) map[string]any {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return nil
-	}
-	var walk func(any) map[string]any
-	walk = func(value any) map[string]any {
+func findRenderer(root any, rendererName string) *jsonObject {
+	var walk func(any) *jsonObject
+	walk = func(value any) *jsonObject {
 		switch node := value.(type) {
 		case []any:
 			for _, child := range node {
@@ -624,12 +616,12 @@ func findRenderer(raw json.RawMessage, rendererName string) map[string]any {
 					return renderer
 				}
 			}
-		case map[string]any:
-			if renderer, ok := node[rendererName].(map[string]any); ok {
+		case *jsonObject:
+			if renderer, ok := node.get(rendererName).(*jsonObject); ok {
 				return renderer
 			}
-			for _, key := range sortedKeys(node) {
-				if renderer := walk(node[key]); renderer != nil {
+			for _, member := range node.members {
+				if renderer := walk(member.value); renderer != nil {
 					return renderer
 				}
 			}
@@ -642,9 +634,15 @@ func findRenderer(raw json.RawMessage, rendererName string) map[string]any {
 // newBrowseResult reads a browse response. The response is parsed once, and
 // everything taken from it is read off that one tree.
 func (c *Client) newBrowseResult(raw json.RawMessage) *BrowseResult {
-	root := decodeResponse(raw)
+	return browseResult(decodeResponse(raw))
+}
+
+// browseResult reads a decoded browse response into the page's items, sections
+// and continuation.
+func browseResult(root any) *BrowseResult {
+	items, sections := browseParts(root, true)
 	return &BrowseResult{
-		Items: extractMusicItems(root), Sections: extractMusicSections(root),
+		Items: items, Sections: sections,
 		ContinuationToken: continuationToken(root),
 	}
 }
@@ -652,19 +650,10 @@ func (c *Client) newBrowseResult(raw json.RawMessage) *BrowseResult {
 // newSearchResult reads a search response, as newBrowseResult does a browse.
 func (c *Client) newSearchResult(raw json.RawMessage) *SearchResult {
 	root := decodeResponse(raw)
+	items, _ := browseParts(root, false)
 	return &SearchResult{
-		Items: extractMusicItems(root), ContinuationToken: continuationToken(root),
+		Items: items, ContinuationToken: continuationToken(root),
 	}
-}
-
-// decodeResponse parses a response into the generic form the extractors walk,
-// and gives nil, which they read as empty, for what is not JSON.
-func decodeResponse(raw json.RawMessage) any {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return nil
-	}
-	return root
 }
 
 func browseContinuations(result *BrowseResult) []string {
@@ -690,23 +679,22 @@ func continuationToken(root any) string {
 					return token
 				}
 			}
-		case map[string]any:
-			if command, ok := node["continuationCommand"].(map[string]any); ok {
-				if token, ok := command["token"].(string); ok && token != "" {
+		case *jsonObject:
+			if command, ok := node.get("continuationCommand").(*jsonObject); ok {
+				if token, ok := command.get("token").(string); ok && token != "" {
 					return token
 				}
 			}
-			if next, ok := node["nextContinuationData"].(map[string]any); ok {
-				if token, ok := next["continuation"].(string); ok && token != "" {
+			if next, ok := node.get("nextContinuationData").(*jsonObject); ok {
+				if token, ok := next.get("continuation").(string); ok && token != "" {
 					return token
 				}
 			}
-			if token, ok := node["continuation"].(string); ok && token != "" {
+			if token, ok := node.get("continuation").(string); ok && token != "" {
 				return token
 			}
-			keys := sortedKeys(node)
-			for _, key := range keys {
-				if token := walk(node[key]); token != "" {
+			for _, member := range node.members {
+				if token := walk(member.value); token != "" {
 					return token
 				}
 			}
@@ -716,40 +704,86 @@ func continuationToken(root any) string {
 	return walk(root)
 }
 
-func extractMusicSections(root any) []MusicSection {
+// browseParts walks a response once, in document order, and returns the items
+// and sections it holds. Every item renderer is parsed once, whether it sits
+// inside a section or outside one, and a section's items are the ones it
+// itself listed.
+func browseParts(root any, wantSections bool) ([]MusicItem, []MusicSection) {
+	var items []MusicItem
 	var sections []MusicSection
-	var walk func(any)
-	walk = func(value any) {
+	seen := make(map[string]struct{})
+	var walk func(any, *sectionItems)
+	walk = func(value any, section *sectionItems) {
 		switch node := value.(type) {
 		case []any:
 			for _, child := range node {
-				walk(child)
+				walk(child, section)
 			}
-		case map[string]any:
-			for _, key := range sortedKeys(node) {
-				child := node[key]
-				if key == "musicShelfRenderer" || key == "musicPlaylistShelfRenderer" || key == "playlistVideoListRenderer" || key == "gridRenderer" || key == "musicCarouselShelfRenderer" {
-					if renderer, ok := child.(map[string]any); ok {
+		case *jsonObject:
+			for _, member := range node.members {
+				if section == nil && wantSections && isSectionRenderer(member.key) {
+					if renderer, ok := member.value.(*jsonObject); ok {
+						current := &sectionItems{seen: make(map[string]struct{})}
+						walk(renderer, current)
 						sections = append(sections, MusicSection{
-							Title: rendererTitle(renderer), Kind: key,
-							Items: extractMusicItems(renderer), ContinuationToken: continuationToken(renderer),
+							Title: rendererTitle(renderer), Kind: member.key,
+							Items: current.items, ContinuationToken: continuationToken(renderer),
 						})
+						continue
 					}
-					continue
 				}
-				walk(child)
+				if item, renderer, ok := parseMusicRenderer(member.key, member.value); ok {
+					appendMusicItem(&items, seen, item, renderer)
+					if section != nil {
+						appendMusicItem(&section.items, section.seen, item, renderer)
+					}
+				}
+				walk(member.value, section)
 			}
 		}
 	}
-	walk(root)
-	return sections
+	walk(root, nil)
+	return items, sections
 }
 
-func extractAccountChannels(raw json.RawMessage) []AccountChannel {
-	var root any
-	if json.Unmarshal(raw, &root) != nil {
-		return nil
+// sectionItems collects one section's items, which dedupe against each other
+// rather than against the whole page.
+type sectionItems struct {
+	items []MusicItem
+	seen  map[string]struct{}
+}
+
+// parseMusicRenderer reads the item a key and value name, when the key names an
+// item renderer.
+func parseMusicRenderer(key string, value any) (MusicItem, *jsonObject, bool) {
+	renderer, ok := value.(*jsonObject)
+	if !ok {
+		return MusicItem{}, nil, false
 	}
+	if key == "musicCardShelfRenderer" {
+		// A search's top result is a card, not a list entry.
+		item, ok := parseMusicCardShelf(renderer)
+		return item, renderer, ok
+	}
+	kind, ok := rendererKind(key)
+	if !ok {
+		return MusicItem{}, nil, false
+	}
+	return parseMusicItem(kind, renderer), renderer, true
+}
+
+// isSectionRenderer reports whether a key names a shelf or grid the page shows
+// as its own section.
+func isSectionRenderer(key string) bool {
+	switch key {
+	case "musicShelfRenderer", "musicPlaylistShelfRenderer", "playlistVideoListRenderer", "gridRenderer", "musicCarouselShelfRenderer":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractAccountChannels(root any) []AccountChannel {
 	var channels []AccountChannel
 	seen := make(map[string]struct{})
 	appendChannel := func(channel AccountChannel) {
@@ -770,18 +804,18 @@ func extractAccountChannels(raw json.RawMessage) []AccountChannel {
 			for _, child := range node {
 				walk(child)
 			}
-		case map[string]any:
+		case *jsonObject:
 			if hasAccountChannelFields(node) {
 				appendChannel(parseAccountChannel(node))
 				return
 			}
-			for _, key := range sortedKeys(node) {
-				child, ok := node[key].(map[string]any)
+			for _, member := range node.members {
+				child, ok := member.value.(*jsonObject)
 				if !ok {
-					walk(node[key])
+					walk(member.value)
 					continue
 				}
-				if key == "accountItemRenderer" || key == "accountItem" {
+				if member.key == "accountItemRenderer" || member.key == "accountItem" {
 					appendChannel(parseAccountChannel(child))
 					continue
 				}
@@ -797,44 +831,44 @@ func extractAccountChannels(raw json.RawMessage) []AccountChannel {
 	return channels
 }
 
-func parseAccountChannel(renderer map[string]any) AccountChannel {
+func parseAccountChannel(renderer *jsonObject) AccountChannel {
 	channel := AccountChannel{
-		Name:       rendererText(renderer["accountName"]),
-		Byline:     rendererText(renderer["accountByline"]),
-		Handle:     rendererText(renderer["channelHandle"]),
-		Thumbnail:  rendererThumbnail(renderer["accountPhoto"]),
-		Selected:   rendererBool(renderer["isSelected"]),
-		Disabled:   rendererBool(renderer["isDisabled"]),
-		HasChannel: rendererBool(renderer["hasChannel"]),
-		ChannelID:  navigationID(renderer["endpoint"]),
+		Name:       rendererText(renderer.get("accountName")),
+		Byline:     rendererText(renderer.get("accountByline")),
+		Handle:     rendererText(renderer.get("channelHandle")),
+		Thumbnail:  rendererThumbnail(renderer.get("accountPhoto")),
+		Selected:   rendererBool(renderer.get("isSelected")),
+		Disabled:   rendererBool(renderer.get("isDisabled")),
+		HasChannel: rendererBool(renderer.get("hasChannel")),
+		ChannelID:  navigationID(renderer.get("endpoint")),
 	}
 	if channel.Name == "" {
-		channel.Name = rendererText(renderer["account_name"])
+		channel.Name = rendererText(renderer.get("account_name"))
 	}
 	if channel.Name == "" {
-		channel.Name = rendererText(renderer["name"])
+		channel.Name = rendererText(renderer.get("name"))
 	}
 	if channel.ChannelID == "" {
-		channel.ChannelID, _ = renderer["channelId"].(string)
+		channel.ChannelID, _ = renderer.get("channelId").(string)
 	}
 	if channel.Handle == "" {
-		channel.Handle, _ = renderer["handle"].(string)
+		channel.Handle, _ = renderer.get("handle").(string)
 	}
 	if channel.Handle == "" {
-		channel.Handle, _ = renderer["channel_handle"].(string)
+		channel.Handle, _ = renderer.get("channel_handle").(string)
 	}
 	if channel.Byline == "" {
-		channel.Byline = rendererText(renderer["account_byline"])
+		channel.Byline = rendererText(renderer.get("account_byline"))
 	}
 	if channel.Thumbnail == "" {
-		channel.Thumbnail = rendererThumbnail(renderer["account_photo"])
+		channel.Thumbnail = rendererThumbnail(renderer.get("account_photo"))
 	}
 	return channel
 }
 
-func hasAccountChannelFields(value map[string]any) bool {
+func hasAccountChannelFields(value *jsonObject) bool {
 	for _, key := range []string{"channelId", "accountName", "account_name", "channelHandle", "channel_handle"} {
-		if value[key] != nil {
+		if value.get(key) != nil {
 			return true
 		}
 	}
@@ -846,55 +880,13 @@ func rendererBool(value any) bool {
 	return result
 }
 
-func sortedKeys(object map[string]any) []string {
-	keys := make([]string, 0, len(object))
-	for key := range object {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func extractMusicItems(root any) []MusicItem {
-	var items []MusicItem
-	seen := make(map[string]struct{})
-	var walk func(any)
-	walk = func(value any) {
-		switch node := value.(type) {
-		case []any:
-			for _, child := range node {
-				walk(child)
-			}
-		case map[string]any:
-			for _, key := range sortedKeys(node) {
-				child := node[key]
-				if key == "musicCardShelfRenderer" {
-					// A search's top result is a card, not a list entry.
-					if renderer, ok := child.(map[string]any); ok {
-						if item, ok := parseMusicCardShelf(renderer); ok {
-							appendMusicItem(&items, seen, item, renderer)
-						}
-					}
-				} else if kind, ok := rendererKind(key); ok {
-					if renderer, ok := child.(map[string]any); ok {
-						appendMusicItem(&items, seen, parseMusicItem(kind, renderer), renderer)
-					}
-				}
-				walk(child)
-			}
-		}
-	}
-	walk(root)
-	return items
-}
-
 // appendMusicItem keeps a parsed item unless its renderer held nothing to
 // identify it by. A playlist may hold a song twice; its entries differ by
 // the ID the playlist gave each, which keeps both.
-func appendMusicItem(items *[]MusicItem, seen map[string]struct{}, item MusicItem, renderer map[string]any) {
+func appendMusicItem(items *[]MusicItem, seen map[string]struct{}, item MusicItem, renderer *jsonObject) {
 	identity := strings.Join([]string{
 		item.VideoID, item.BrowseID, item.PlaylistID, item.Title,
-		nestedString(renderer["playlistItemData"], "playlistSetVideoId"),
+		nestedString(renderer.get("playlistItemData"), "playlistSetVideoId"),
 	}, "\x00")
 	if identity == "\x00\x00\x00\x00" {
 		return
@@ -910,20 +902,20 @@ func appendMusicItem(items *[]MusicItem, seen map[string]struct{}, item MusicIte
 // the card itself, outside any list: the title run navigates to the video,
 // the artist's browse endpoint sits in the subtitle runs, and the length
 // trails the subtitle.
-func parseMusicCardShelf(renderer map[string]any) (MusicItem, bool) {
+func parseMusicCardShelf(renderer *jsonObject) (MusicItem, bool) {
 	item := MusicItem{Kind: "video"}
-	item.Title = rendererText(renderer["title"])
-	item.Subtitle = rendererText(renderer["subtitle"])
+	item.Title = rendererText(renderer.get("title"))
+	item.Subtitle = rendererText(renderer.get("subtitle"))
 	if duration := trailingDuration(item.Subtitle); duration != "" {
 		item.Duration = duration
 		item.Subtitle = strings.TrimSuffix(item.Subtitle, " • "+duration)
 	}
-	item.VideoID = nestedString([]any{renderer["title"], renderer["onTap"], renderer["thumbnailOverlay"]}, "videoId")
+	item.VideoID = nestedString([]any{renderer.get("title"), renderer.get("onTap"), renderer.get("thumbnailOverlay")}, "videoId")
 	if item.VideoID == "" {
 		item.VideoID = rendererVideoID(renderer)
 	}
 	item.BrowseID = cardArtistBrowseID(renderer)
-	item.Thumbnail = rendererThumbnail(renderer["thumbnail"])
+	item.Thumbnail = rendererThumbnail(renderer.get("thumbnail"))
 	if item.Thumbnail == "" {
 		item.Thumbnail = rendererThumbnail(renderer)
 	}
@@ -940,26 +932,26 @@ func parseMusicCardShelf(renderer map[string]any) (MusicItem, bool) {
 
 // cardArtistBrowseID reads the artist a card's subtitle names. navigationID
 // cannot: it would return the mix queue of the card's menu entries first.
-func cardArtistBrowseID(renderer map[string]any) string {
-	subtitle, ok := renderer["subtitle"].(map[string]any)
+func cardArtistBrowseID(renderer *jsonObject) string {
+	subtitle, ok := renderer.get("subtitle").(*jsonObject)
 	if !ok {
 		return ""
 	}
-	runs, ok := subtitle["runs"].([]any)
+	runs, ok := subtitle.get("runs").([]any)
 	if !ok {
 		return ""
 	}
 	for _, value := range runs {
-		run, ok := value.(map[string]any)
+		run, ok := value.(*jsonObject)
 		if !ok {
 			continue
 		}
-		endpoint, ok := run["navigationEndpoint"].(map[string]any)
+		endpoint, ok := run.get("navigationEndpoint").(*jsonObject)
 		if !ok {
 			continue
 		}
-		if browse, ok := endpoint["browseEndpoint"].(map[string]any); ok {
-			if id, _ := browse["browseId"].(string); id != "" {
+		if browse, ok := endpoint.get("browseEndpoint").(*jsonObject); ok {
+			if id, _ := browse.get("browseId").(string); id != "" {
 				return id
 			}
 		}
@@ -969,11 +961,11 @@ func cardArtistBrowseID(renderer map[string]any) string {
 
 // rendererArtistBrowseID reads an artist browse endpoint from a track's
 // subtitle or second flex column, without treating album links as artists.
-func rendererArtistBrowseID(renderer map[string]any) string {
-	if id := artistBrowseEndpoint(renderer["subtitle"]); id != "" {
+func rendererArtistBrowseID(renderer *jsonObject) string {
+	if id := artistBrowseEndpoint(renderer.get("subtitle")); id != "" {
 		return id
 	}
-	columns, ok := renderer["flexColumns"].([]any)
+	columns, ok := renderer.get("flexColumns").([]any)
 	if !ok || len(columns) < 2 {
 		return ""
 	}
@@ -988,14 +980,14 @@ func artistBrowseEndpoint(value any) string {
 				return id
 			}
 		}
-	case map[string]any:
-		if endpoint, ok := node["browseEndpoint"].(map[string]any); ok {
-			if id, _ := endpoint["browseId"].(string); strings.HasPrefix(id, "UC") || strings.Contains(id, "privately_owned_artist") {
+	case *jsonObject:
+		if endpoint, ok := node.get("browseEndpoint").(*jsonObject); ok {
+			if id, _ := endpoint.get("browseId").(string); strings.HasPrefix(id, "UC") || strings.Contains(id, "privately_owned_artist") {
 				return id
 			}
 		}
-		for _, key := range sortedKeys(node) {
-			if id := artistBrowseEndpoint(node[key]); id != "" {
+		for _, member := range node.members {
+			if id := artistBrowseEndpoint(member.value); id != "" {
 				return id
 			}
 		}
@@ -1037,20 +1029,20 @@ func rendererKind(key string) (string, bool) {
 	}
 }
 
-func parseMusicItem(kind string, renderer map[string]any) MusicItem {
+func parseMusicItem(kind string, renderer *jsonObject) MusicItem {
 	item := MusicItem{Kind: kind}
-	item.Title = rendererText(renderer["title"])
+	item.Title = rendererText(renderer.get("title"))
 	if item.Title == "" {
-		item.Title = rendererText(renderer["headline"])
+		item.Title = rendererText(renderer.get("headline"))
 	}
 	if item.Title == "" {
 		item.Title = rendererColumnText(renderer, "flexColumns", 0)
 	}
-	item.Subtitle = rendererText(renderer["subtitle"])
+	item.Subtitle = rendererText(renderer.get("subtitle"))
 	if item.Subtitle == "" {
 		item.Subtitle = rendererColumnText(renderer, "flexColumns", 1)
 	}
-	item.Duration = rendererText(renderer["lengthText"])
+	item.Duration = rendererText(renderer.get("lengthText"))
 	if item.Duration == "" {
 		item.Duration = rendererColumnText(renderer, "fixedColumns", 0)
 	}
@@ -1062,12 +1054,12 @@ func parseMusicItem(kind string, renderer map[string]any) MusicItem {
 			item.Subtitle = strings.TrimSuffix(item.Subtitle, " • "+item.Duration)
 		}
 	}
-	item.VideoID, _ = renderer["videoId"].(string)
+	item.VideoID, _ = renderer.get("videoId").(string)
 	if item.VideoID == "" {
 		item.VideoID = rendererVideoID(renderer)
 	}
-	item.PlaylistID, _ = renderer["playlistId"].(string)
-	item.BrowseID = navigationID(renderer["navigationEndpoint"])
+	item.PlaylistID, _ = renderer.get("playlistId").(string)
+	item.BrowseID = navigationID(renderer.get("navigationEndpoint"))
 	if kind == "track" || kind == "video" {
 		if artistID := rendererArtistBrowseID(renderer); artistID != "" {
 			item.BrowseID = artistID
@@ -1081,7 +1073,7 @@ func parseMusicItem(kind string, renderer map[string]any) MusicItem {
 		item.ID = item.PlaylistID
 	}
 	if item.Thumbnail == "" {
-		item.Thumbnail = rendererThumbnail(renderer["thumbnail"])
+		item.Thumbnail = rendererThumbnail(renderer.get("thumbnail"))
 	}
 	if item.Thumbnail == "" {
 		// Two-row items keep their art under thumbnailRenderer instead of
@@ -1095,21 +1087,21 @@ func rendererText(value any) string {
 	if text, ok := value.(string); ok {
 		return text
 	}
-	object, ok := value.(map[string]any)
+	object, ok := value.(*jsonObject)
 	if !ok {
 		return ""
 	}
-	if text, ok := object["simpleText"].(string); ok {
+	if text, ok := object.get("simpleText").(string); ok {
 		return text
 	}
-	runs, ok := object["runs"].([]any)
+	runs, ok := object.get("runs").([]any)
 	if !ok {
 		return ""
 	}
 	var builder strings.Builder
 	for _, value := range runs {
-		if run, ok := value.(map[string]any); ok {
-			if text, ok := run["text"].(string); ok {
+		if run, ok := value.(*jsonObject); ok {
+			if text, ok := run.get("text").(string); ok {
 				builder.WriteString(text)
 			}
 		}
@@ -1117,20 +1109,20 @@ func rendererText(value any) string {
 	return builder.String()
 }
 
-func rendererColumnText(renderer map[string]any, columnName string, index int) string {
-	columns, ok := renderer[columnName].([]any)
+func rendererColumnText(renderer *jsonObject, columnName string, index int) string {
+	columns, ok := renderer.get(columnName).([]any)
 	if !ok || index >= len(columns) {
 		return ""
 	}
-	column, ok := columns[index].(map[string]any)
+	column, ok := columns[index].(*jsonObject)
 	if !ok {
 		return ""
 	}
 	// A flex column holds a musicResponsiveListItemFlexColumnRenderer and a
 	// fixed column a musicResponsiveListItemFixedColumnRenderer.
 	for _, key := range []string{"musicResponsiveListItemFlexColumnRenderer", "musicResponsiveListItemFixedColumnRenderer"} {
-		if columnRenderer, ok := column[key].(map[string]any); ok {
-			return rendererText(columnRenderer["text"])
+		if columnRenderer, ok := column.get(key).(*jsonObject); ok {
+			return rendererText(columnRenderer.get("text"))
 		}
 	}
 	return ""
@@ -1139,10 +1131,10 @@ func rendererColumnText(renderer map[string]any, columnName string, index int) s
 // rendererVideoID finds a renderer's video ID where a track's own taps
 // keep it: its data, its play overlay and its columns. The menu stays out:
 // its mix and shuffle entries carry queue IDs, not the track's.
-func rendererVideoID(renderer map[string]any) string {
+func rendererVideoID(renderer *jsonObject) string {
 	for _, key := range []string{"playlistItemData", "overlay", "flexColumns", "thumbnailOverlay", "navigationEndpoint", "title", "onTap"} {
-		value, ok := renderer[key]
-		if !ok {
+		value := renderer.get(key)
+		if value == nil {
 			continue
 		}
 		if id := nestedString(value, "videoId"); id != "" {
@@ -1154,20 +1146,20 @@ func rendererVideoID(renderer map[string]any) string {
 
 // rendererTitle reads a shelf's title, which newer responses put in the
 // shelf's header instead of the shelf itself.
-func rendererTitle(renderer map[string]any) string {
-	if title := rendererText(renderer["title"]); title != "" {
+func rendererTitle(renderer *jsonObject) string {
+	if title := rendererText(renderer.get("title")); title != "" {
 		return title
 	}
-	header, ok := renderer["header"].(map[string]any)
+	header, ok := renderer.get("header").(*jsonObject)
 	if !ok {
 		return ""
 	}
-	for _, key := range sortedKeys(header) {
-		headerRenderer, ok := header[key].(map[string]any)
+	for _, member := range header.members {
+		headerRenderer, ok := member.value.(*jsonObject)
 		if !ok {
 			continue
 		}
-		if title := rendererText(headerRenderer["title"]); title != "" {
+		if title := rendererText(headerRenderer.get("title")); title != "" {
 			return title
 		}
 	}
@@ -1175,7 +1167,8 @@ func rendererTitle(renderer map[string]any) string {
 }
 
 // nestedString returns the first non-empty string stored under name anywhere
-// in value. It visits maps in sorted key order, so the result is stable.
+// in value. It visits members in document order, so the result follows the
+// response.
 func nestedString(value any, name string) string {
 	var result string
 	var walk func(any)
@@ -1188,13 +1181,13 @@ func nestedString(value any, name string) string {
 			for _, child := range node {
 				walk(child)
 			}
-		case map[string]any:
-			if text, ok := node[name].(string); ok && text != "" {
+		case *jsonObject:
+			if text, ok := node.get(name).(string); ok && text != "" {
 				result = text
 				return
 			}
-			for _, key := range sortedKeys(node) {
-				walk(node[key])
+			for _, member := range node.members {
+				walk(member.value)
 			}
 		}
 	}
@@ -1205,37 +1198,37 @@ func nestedString(value any, name string) string {
 // rendererFlexDuration reads a track length from the trailing run of a
 // musicResponsiveListItemRenderer's last flex column, where search and
 // library rows keep it.
-func rendererFlexDuration(renderer map[string]any) string {
-	columns, ok := renderer["flexColumns"].([]any)
+func rendererFlexDuration(renderer *jsonObject) string {
+	columns, ok := renderer.get("flexColumns").([]any)
 	if !ok {
 		return ""
 	}
 	for index := len(columns) - 1; index >= 0; index-- {
-		column, ok := columns[index].(map[string]any)
+		column, ok := columns[index].(*jsonObject)
 		if !ok {
 			continue
 		}
-		columnRenderer, ok := column["musicResponsiveListItemFlexColumnRenderer"].(map[string]any)
+		columnRenderer, ok := column.get("musicResponsiveListItemFlexColumnRenderer").(*jsonObject)
 		if !ok {
 			continue
 		}
-		text, ok := columnRenderer["text"].(map[string]any)
+		text, ok := columnRenderer.get("text").(*jsonObject)
 		if !ok {
 			continue
 		}
-		runs, ok := text["runs"].([]any)
+		runs, ok := text.get("runs").([]any)
 		if !ok {
 			continue
 		}
 		for runIndex := len(runs) - 1; runIndex >= 0; runIndex-- {
-			run, ok := runs[runIndex].(map[string]any)
+			run, ok := runs[runIndex].(*jsonObject)
 			if !ok {
 				continue
 			}
-			if _, navigates := run["navigationEndpoint"]; navigates {
+			if run.has("navigationEndpoint") {
 				continue
 			}
-			if text, _ := run["text"].(string); isDurationText(text) {
+			if text, _ := run.get("text").(string); isDurationText(text) {
 				return text
 			}
 		}
@@ -1275,15 +1268,15 @@ func navigationID(value any) string {
 			for _, child := range node {
 				walk(child)
 			}
-		case map[string]any:
+		case *jsonObject:
 			// Queue taps name a watch endpoint, not a page: their playlist
 			// is the mix being offered, and the track itself carries the
 			// video ID. navigationID only names browsable pages.
-			if _, watching := node["watchEndpoint"]; watching {
+			if node.has("watchEndpoint") {
 				return
 			}
 			for _, name := range []string{"browseId", "playlistId"} {
-				if value, ok := node[name].(string); ok && value != "" {
+				if value, ok := node.get(name).(string); ok && value != "" {
 					if name == "playlistId" && !isBrowsablePlaylist(value) {
 						continue
 					}
@@ -1291,8 +1284,8 @@ func navigationID(value any) string {
 					return
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				walk(node[key])
+			for _, member := range node.members {
+				walk(member.value)
 			}
 		}
 	}
@@ -1319,14 +1312,14 @@ func rendererThumbnail(value any) string {
 			for _, child := range node {
 				walk(child)
 			}
-		case map[string]any:
-			if thumbnails, ok := node["thumbnails"].([]any); ok && len(thumbnails) > 0 {
-				if thumbnail, ok := thumbnails[len(thumbnails)-1].(map[string]any); ok {
-					result, _ = thumbnail["url"].(string)
+		case *jsonObject:
+			if thumbnails, ok := node.get("thumbnails").([]any); ok && len(thumbnails) > 0 {
+				if thumbnail, ok := thumbnails[len(thumbnails)-1].(*jsonObject); ok {
+					result, _ = thumbnail.get("url").(string)
 				}
 			}
-			for _, key := range sortedKeys(node) {
-				walk(node[key])
+			for _, member := range node.members {
+				walk(member.value)
 			}
 		}
 	}
