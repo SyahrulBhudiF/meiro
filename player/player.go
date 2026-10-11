@@ -71,6 +71,13 @@ func WithFFmpeg(path string) Option {
 	return func(p *Player) { p.ffmpegPath = path }
 }
 
+// withAudio supplies the audio context used by a Player. It is kept internal
+// so tests can replace the operating-system output without exposing it as an
+// application configuration surface.
+func withAudio(audio *sharedAudio) Option {
+	return func(p *Player) { p.audio = audio }
+}
+
 // New creates a player that is not yet playing anything. It does not touch
 // the audio device or the file system.
 func New(options ...Option) *Player {
@@ -556,15 +563,22 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // boundedBuffer keeps the first limit bytes written to it, which is enough
 // of ffmpeg's error output to explain a failed decode.
 type boundedBuffer struct {
+	mu    sync.Mutex
 	buf   []byte
 	limit int
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if room := b.limit - len(b.buf); room > 0 {
 		b.buf = append(b.buf, p[:min(room, len(p))]...)
 	}
 	return len(p), nil
 }
 
-func (b *boundedBuffer) String() string { return string(b.buf) }
+func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
