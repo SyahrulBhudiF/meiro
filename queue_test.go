@@ -48,7 +48,7 @@ func TestPlayerBarShowsTheCurrentTrack(t *testing.T) {
 
 func TestSystemMediaCommandsUpdatePlaybackState(t *testing.T) {
 	a := newApp()
-	a.current = youtube.MusicItem{VideoID: "current", Title: "Current song", Subtitle: "An artist"}
+	a.current = youtube.MusicItem{VideoID: "current", Title: "Current song", Subtitle: "An artist", Thumbnail: "https://lh3.googleusercontent.com/cover=w544-h544-l90-rj"}
 	a.queue = []youtube.MusicItem{a.current, {VideoID: "next", Title: "Next song"}}
 	a.total = 3 * time.Minute
 	a.volume = 60
@@ -59,6 +59,9 @@ func TestSystemMediaCommandsUpdatePlaybackState(t *testing.T) {
 	if media.state.Title != "Current song" || media.state.Artist != "An artist" || !media.state.CanNext || media.state.Volume != 0.6 {
 		t.Fatalf("initial system media state = %+v", media.state)
 	}
+	if media.state.ArtworkURL != "https://lh3.googleusercontent.com/cover=w512-h512-l90-rj" {
+		t.Errorf("system media artwork is not intentionally sized: %s", media.state.ArtworkURL)
+	}
 
 	controls := a.systemMediaControls()
 	controls.SetVolume(0.35)
@@ -66,6 +69,33 @@ func TestSystemMediaCommandsUpdatePlaybackState(t *testing.T) {
 	controls.SetRepeat("Playlist")
 	if a.volume != 35 || a.player.Volume() != 0.35 || !media.state.Shuffle || media.state.Volume != 0.35 || a.repeat != repeatQueue || media.state.LoopStatus != "Playlist" {
 		t.Errorf("media volume/shuffle/repeat did not reach the app and system state: app volume=%v player volume=%v repeat=%v state=%+v", a.volume, a.player.Volume(), a.repeat, media.state)
+	}
+	for _, volume := range []float64{-0.1, 1.2} {
+		controls.SetVolume(volume)
+		want := float64(0)
+		if volume > 1 {
+			want = 1
+		}
+		if a.player.Volume() != want || media.state.Volume != want {
+			t.Errorf("volume %v was not clamped: player=%v media=%v", volume, a.player.Volume(), media.state.Volume)
+		}
+	}
+	controls.Seek(100 * time.Millisecond)
+	if media.state.SeekVersion != 1 {
+		t.Errorf("explicit seek version = %d, want 1", media.state.SeekVersion)
+	}
+	a.syncSystemMedia()
+	if media.state.SeekVersion != 1 {
+		t.Error("ordinary state publication was reported as a seek")
+	}
+	a.previous()
+	if media.state.SeekVersion != 2 {
+		t.Errorf("restart seek version = %d, want 2", media.state.SeekVersion)
+	}
+	a.current.Thumbnail = ""
+	a.syncSystemMedia()
+	if media.state.ArtworkURL != "" {
+		t.Error("clearing artwork retained the previous URL")
 	}
 	a.resolving = true
 	controls.Stop()

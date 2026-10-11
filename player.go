@@ -85,8 +85,7 @@ func (a *app) scrubber(c *ui.Context) {
 		}
 		if a.scrubbing && !slider.Pressed() {
 			a.scrubbing = false
-			a.player.Seek(time.Duration(a.scrub * float64(time.Second)))
-			a.syncSystemMedia()
+			a.seek(time.Duration(a.scrub * float64(time.Second)))
 		}
 		m3.Text(c, m3.LabelMedium, clock(a.total)).Width(40).Shrink(0).TextColor(sc.OnSurfaceVariant).FontFeatures("tnum")
 	})

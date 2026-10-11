@@ -15,12 +15,14 @@ const (
 
 // State describes the track and controls currently available to the user.
 type State struct {
-	VideoID     string
-	Title       string
-	Artist      string
-	ArtworkURL  string
-	Duration    time.Duration
-	Position    time.Duration
+	VideoID    string
+	Title      string
+	Artist     string
+	ArtworkURL string
+	Duration   time.Duration
+	Position   time.Duration
+	// SeekVersion advances on explicit seeks, including small seeks while playing.
+	SeekVersion uint64
 	Status      Status
 	LoopStatus  string
 	Volume      float64
@@ -30,6 +32,18 @@ type State struct {
 	CanPrevious bool
 	CanSeek     bool
 	Shuffle     bool
+}
+
+func (s State) sameMetadata(other State) bool {
+	return s.VideoID == other.VideoID && s.Title == other.Title &&
+		s.Artist == other.Artist && s.ArtworkURL == other.ArtworkURL && s.Duration == other.Duration
+}
+
+func durationDistance(a, b time.Duration) time.Duration {
+	if a > b {
+		return a - b
+	}
+	return b - a
 }
 
 // Controls are called when the operating system sends a media command.

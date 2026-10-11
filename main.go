@@ -34,6 +34,9 @@ type app struct {
 	router             *ui.Router
 	player             *player.Player
 	systemMedia        systemmedia.Session
+	seekVersion        uint64
+	mediaArtworkSource string
+	mediaArtworkURL    string
 	thumbs             *thumbCache
 	audioCache         *audioCache
 	retiredAudioCaches []*audioCache
@@ -525,16 +528,12 @@ func (a *app) systemMediaControls() systemmedia.Controls {
 			a.update(func() { a.previous() })
 		},
 		Seek: func(position time.Duration) {
-			a.update(func() {
-				a.player.Seek(position)
-				a.syncSystemMedia()
-			})
+			a.update(func() { a.seek(position) })
 		},
 		SetVolume: func(volume float64) {
 			a.update(func() {
 				a.setVolume(volume * 100)
 				a.saveSettings()
-				a.syncSystemMedia()
 			})
 		},
 		SetShuffle: func(shuffle bool) {
@@ -589,13 +588,20 @@ func (a *app) syncSystemMedia() {
 	case repeatQueue:
 		loopStatus = "Playlist"
 	}
+	if a.mediaArtworkSource != a.current.Thumbnail {
+		a.mediaArtworkSource = a.current.Thumbnail
+		// Both adapters use 512-pixel artwork. Cache the URL derivation so the
+		// playback ticker does not repeat thumbnail parsing and regex work.
+		a.mediaArtworkURL = thumbnailURL(a.current.Thumbnail, 512)
+	}
 	a.systemMedia.Update(systemmedia.State{
 		VideoID:     a.current.VideoID,
 		Title:       a.current.Title,
 		Artist:      a.current.Subtitle,
-		ArtworkURL:  a.current.Thumbnail,
+		ArtworkURL:  a.mediaArtworkURL,
 		Duration:    a.total,
 		Position:    position,
+		SeekVersion: a.seekVersion,
 		Status:      status,
 		LoopStatus:  loopStatus,
 		Volume:      a.volume / 100,

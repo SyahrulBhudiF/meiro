@@ -176,6 +176,14 @@ jobs:
           esac
           ls -la artifacts
 
+      - name: Record payload sizes
+        run: |
+          {
+            echo '```tsv'
+            python3 scripts/measure-payload.py "dist/${{ matrix.platform }}" artifacts
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@v5
         with:
           name: meiro-${{ matrix.platform }}

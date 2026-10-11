@@ -642,12 +642,18 @@ func (a *app) stopAtQueueEnd() {
 // has only just started.
 func (a *app) previous() {
 	if a.index == 0 || a.player.Position() > 3*time.Second {
-		a.player.Seek(0)
-		a.syncSystemMedia()
+		a.seek(0)
 		return
 	}
 	a.index--
 	a.start(a.queue[a.index])
+}
+
+// seek distinguishes an explicit position change from normal playback progress.
+func (a *app) seek(position time.Duration) {
+	a.player.Seek(position)
+	a.seekVersion++
+	a.syncSystemMedia()
 }
 
 // togglePlay pauses a playing track, resumes a paused one, and starts the

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -20,16 +21,19 @@ const (
 	objectPath      = dbus.ObjectPath("/org/mpris/MediaPlayer2")
 	rootInterface   = "org.mpris.MediaPlayer2"
 	playerInterface = "org.mpris.MediaPlayer2.Player"
+	volumeInterval  = 50 * time.Millisecond
 )
 
 type linuxSession struct {
-	conn     *dbus.Conn
-	busName  string
-	props    *prop.Properties
-	mu       sync.Mutex
-	state    State
-	hasState bool
-	lastPos  time.Time
+	conn        *dbus.Conn
+	busName     string
+	props       *prop.Properties
+	mu          sync.Mutex
+	state       State
+	hasState    bool
+	lastPos     time.Time
+	volumeTimer *time.Timer
+	closed      bool
 }
 
 // New registers Meiro as an MPRIS player on the current user's D-Bus session.
@@ -72,6 +76,9 @@ func New(controls Controls) (Session, error) {
 		return closeOnError(fmt.Errorf("export MPRIS properties: %w", err))
 	}
 	s.props = properties
+	if err := conn.Export(&mprisProperties{Properties: properties, session: s}, objectPath, "org.freedesktop.DBus.Properties"); err != nil {
+		return closeOnError(fmt.Errorf("export MPRIS metadata properties: %w", err))
+	}
 	playerMethods := introspect.Methods(api)
 	for i := range playerMethods {
 		if playerMethods[i].Name == "SeekBy" {
@@ -92,6 +99,9 @@ func New(controls Controls) (Session, error) {
 				Name:       playerInterface,
 				Methods:    playerMethods,
 				Properties: properties.Introspection(playerInterface),
+				Signals: []introspect.Signal{{
+					Name: "Seeked", Args: []introspect.Arg{{Name: "Position", Type: "x"}},
+				}},
 			},
 		},
 	}
@@ -177,59 +187,101 @@ func (s *linuxSession) Update(state State) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 
 	statusChanged := !s.hasState || state.Status != s.state.Status
-	metadataChanged := !s.hasState || state.VideoID != s.state.VideoID || state.Title != s.state.Title || state.Artist != s.state.Artist || state.ArtworkURL != s.state.ArtworkURL || state.Duration != s.state.Duration
+	metadataChanged := !s.hasState || !state.sameMetadata(s.state)
 	if statusChanged {
 		s.props.SetMust(playerInterface, "PlaybackStatus", string(state.Status))
 	}
-	if !s.hasState || state.LoopStatus != s.state.LoopStatus {
+	if (!s.hasState || state.LoopStatus != s.state.LoopStatus) && state.LoopStatus != s.props.GetMust(playerInterface, "LoopStatus") {
 		s.props.SetMust(playerInterface, "LoopStatus", state.LoopStatus)
 	}
 	if metadataChanged {
-		s.props.SetMust(playerInterface, "Metadata", trackMetadata(state))
-	}
-	if !s.hasState || state.Volume != s.state.Volume {
-		s.props.SetMust(playerInterface, "Volume", state.Volume)
-	}
-	if !s.hasState || state.Shuffle != s.state.Shuffle {
-		s.props.SetMust(playerInterface, "Shuffle", state.Shuffle)
-	}
-	for property, value := range map[string]bool{
-		"CanGoNext":     state.CanNext,
-		"CanGoPrevious": state.CanPrevious,
-		"CanPlay":       state.CanPlay,
-		"CanPause":      state.CanPause,
-		"CanSeek":       state.CanSeek,
-	} {
-		if !s.hasState || propertyValue(s.state, property) != value {
-			s.props.SetMust(playerInterface, property, value)
+		// The property library merges maps and retains removed keys. Publish
+		// a fresh map; mprisProperties reads metadata from the same snapshot.
+		if err := s.conn.Emit(objectPath, "org.freedesktop.DBus.Properties.PropertiesChanged",
+			playerInterface, map[string]dbus.Variant{"Metadata": dbus.MakeVariant(trackMetadata(state))}, []string{}); err != nil {
+			log.Printf("publish MPRIS metadata: %v", err)
 		}
 	}
+	if !s.hasState && state.Volume != s.props.GetMust(playerInterface, "Volume") {
+		s.props.SetMust(playerInterface, "Volume", state.Volume)
+	} else if state.Volume != s.state.Volume && s.volumeTimer == nil {
+		// Do not reset the timer during a drag: continuously changing volume
+		// must still reach the OS within one interval, including its final value.
+		s.volumeTimer = time.AfterFunc(volumeInterval, s.publishVolume)
+	}
+	if (!s.hasState || state.Shuffle != s.state.Shuffle) && state.Shuffle != s.props.GetMust(playerInterface, "Shuffle") {
+		s.props.SetMust(playerInterface, "Shuffle", state.Shuffle)
+	}
+	for _, capability := range [...]struct {
+		property string
+		value    bool
+		previous bool
+	}{
+		{"CanGoNext", state.CanNext, s.state.CanNext},
+		{"CanGoPrevious", state.CanPrevious, s.state.CanPrevious},
+		{"CanPlay", state.CanPlay, s.state.CanPlay},
+		{"CanPause", state.CanPause, s.state.CanPause},
+		{"CanSeek", state.CanSeek, s.state.CanSeek},
+	} {
+		if !s.hasState || capability.previous != capability.value {
+			s.props.SetMust(playerInterface, capability.property, capability.value)
+		}
+	}
+	seeked := s.hasState && state.SeekVersion != s.state.SeekVersion
 	positionChangedWhilePaused := state.Status != Playing && state.Position != s.state.Position
-	if !s.hasState || statusChanged || positionChangedWhilePaused || durationDistance(state.Position, s.state.Position) > 3*time.Second || time.Since(s.lastPos) >= time.Second {
+	if !s.hasState || statusChanged || seeked || positionChangedWhilePaused || durationDistance(state.Position, s.state.Position) > 3*time.Second || time.Since(s.lastPos) >= time.Second {
 		s.props.SetMust(playerInterface, "Position", int64(state.Position/time.Microsecond))
 		s.lastPos = time.Now()
+	}
+	if seeked {
+		if err := s.conn.Emit(objectPath, playerInterface+".Seeked", int64(state.Position/time.Microsecond)); err != nil {
+			log.Printf("publish MPRIS seek: %v", err)
+		}
 	}
 	s.state = state
 	s.hasState = true
 }
 
-func propertyValue(state State, property string) bool {
-	switch property {
-	case "CanGoNext":
-		return state.CanNext
-	case "CanGoPrevious":
-		return state.CanPrevious
-	case "CanPlay":
-		return state.CanPlay
-	case "CanPause":
-		return state.CanPause
-	case "CanSeek":
-		return state.CanSeek
-	default:
-		return false
+func (s *linuxSession) publishVolume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.volumeTimer = nil
+	if !s.closed && s.state.Volume != s.props.GetMust(playerInterface, "Volume") {
+		// A remote Properties.Set already publishes its value. Comparing the
+		// property itself also avoids echoing the asynchronous app callback.
+		s.props.SetMust(playerInterface, "Volume", s.state.Volume)
 	}
+}
+
+// mprisProperties leaves scalar properties with the D-Bus library, but builds
+// immutable metadata snapshots so track changes can remove fields atomically.
+type mprisProperties struct {
+	*prop.Properties
+	session *linuxSession
+}
+
+func (p *mprisProperties) Get(iface, property string) (dbus.Variant, *dbus.Error) {
+	if iface == playerInterface && property == "Metadata" {
+		p.session.mu.Lock()
+		defer p.session.mu.Unlock()
+		return dbus.MakeVariant(trackMetadata(p.session.state)), nil
+	}
+	return p.Properties.Get(iface, property)
+}
+
+func (p *mprisProperties) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
+	values, err := p.Properties.GetAll(iface)
+	if err == nil && iface == playerInterface {
+		p.session.mu.Lock()
+		values["Metadata"] = dbus.MakeVariant(trackMetadata(p.session.state))
+		p.session.mu.Unlock()
+	}
+	return values, err
 }
 
 func trackMetadata(state State) map[string]dbus.Variant {
@@ -258,14 +310,16 @@ func trackPath(state State) dbus.ObjectPath {
 	return dbus.ObjectPath("/org/meiro/track/" + hex.EncodeToString([]byte(state.VideoID)))
 }
 
-func durationDistance(a, b time.Duration) time.Duration {
-	if a > b {
-		return a - b
-	}
-	return b - a
-}
-
 func (s *linuxSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.volumeTimer != nil {
+		s.volumeTimer.Stop()
+	}
 	if _, err := s.conn.ReleaseName(s.busName); err != nil {
 		_ = s.conn.Close()
 		return err

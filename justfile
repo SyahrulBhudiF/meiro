@@ -14,6 +14,10 @@ test:
     go vet ./...
     go test -race ./...
 
+# Exercise Linux media controls on a disposable D-Bus session.
+test-media:
+    dbus-run-session -- go test -race -count=1 ./systemmedia
+
 # Download the ffmpeg and yt-dlp a build ships, for one platform.
 tools platform=host:
     scripts/fetch-tools.sh {{platform}}

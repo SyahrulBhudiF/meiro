@@ -93,7 +93,16 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - run: go test -race -count=1 ./...
+      - run: dbus-run-session -- go test -race -count=1 ./...
+
+  systemmedia-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test -race -count=1 -timeout=60s ./systemmedia
 
   scripts:
     runs-on: ubuntu-latest
@@ -104,6 +113,8 @@ jobs:
           shellcheck --severity=warning scripts/fetch-tools.sh scripts/package-linux.sh
           bash -n scripts/fetch-tools.sh
           bash -n scripts/package-linux.sh
+      - name: Check the payload measurement script
+        run: python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/measure-payload.py").read_text())'
       - name: Check workflows
         run: |
           curl --fail --location --silent --show-error \
@@ -119,7 +130,7 @@ jobs:
   # CI run on the tag's commit instead.
   checks:
     if: always()
-    needs: [format, tidy, vet, lint, cross-compile, test, scripts]
+    needs: [format, tidy, vet, lint, cross-compile, test, systemmedia-macos, scripts]
     runs-on: ubuntu-latest
     steps:
       - name: All checks must pass
@@ -131,6 +142,7 @@ jobs:
              [ "${{ needs.lint.result }}" != "success" ] || \
              [ "${{ needs.cross-compile.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
+             [ "${{ needs.systemmedia-macos.result }}" != "success" ] || \
              [ "${{ needs.scripts.result }}" != "success" ]; then
             echo "One or more checks failed."
             exit 1
