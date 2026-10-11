@@ -80,7 +80,7 @@ func New(options ...Option) *Player {
 	}
 	// Opening the device can take a long while; do it now, off the thread
 	// that will later press play.
-	go p.audio.context()
+	go func() { _, _ = p.audio.context() }()
 	return p
 }
 
