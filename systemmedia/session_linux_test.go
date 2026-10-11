@@ -204,5 +204,5 @@ func TestMPRISSetPropertyDoesNotHideRuntimePanics(t *testing.T) {
 			t.Fatal("setProperty hid a runtime panic")
 		}
 	}()
-	(&linuxSession{}).setProperty("PlaybackStatus", string(Playing))
+	_ = (&linuxSession{}).setProperty("PlaybackStatus", string(Playing))
 }
