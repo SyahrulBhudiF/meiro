@@ -61,10 +61,16 @@ func New(controls Controls) (Session, error) {
 	root := &mprisRoot{}
 	api := &mprisPlayer{
 		controls: controls,
-		trackID: func() dbus.ObjectPath {
+		state: func() State {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return trackPath(s.state)
+			return s.state
+		},
+		seek: func(position time.Duration) {
+			if controls.Seek == nil {
+				return
+			}
+			controls.Seek(position)
 		},
 	}
 	if err := conn.Export(root, objectPath, rootInterface); err != nil {
@@ -380,7 +386,8 @@ func (*mprisRoot) Quit() *dbus.Error  { return nil }
 
 type mprisPlayer struct {
 	controls Controls
-	trackID  func() dbus.ObjectPath
+	state    func() State
+	seek     func(time.Duration)
 }
 
 func (api *mprisPlayer) Next() *dbus.Error      { call(api.controls.Next); return nil }
@@ -390,17 +397,44 @@ func (api *mprisPlayer) PlayPause() *dbus.Error { call(api.controls.Toggle); ret
 func (api *mprisPlayer) Stop() *dbus.Error      { call(api.controls.Stop); return nil }
 func (api *mprisPlayer) Play() *dbus.Error      { call(api.controls.Play); return nil }
 func (api *mprisPlayer) SeekBy(offset int64) *dbus.Error {
-	if api.controls.Seek != nil {
-		api.controls.Seek(time.Duration(offset) * time.Microsecond)
+	state := api.state()
+	const maxDuration = time.Duration(1<<63 - 1)
+	const minDuration = time.Duration(-1 << 63)
+	position := state.Position
+	if offset > 0 && offset > int64(maxDuration/time.Microsecond) {
+		position = maxDuration
+	} else if offset < 0 && offset < int64(minDuration/time.Microsecond) {
+		position = minDuration
+	} else {
+		delta := time.Duration(offset) * time.Microsecond
+		if delta > 0 && position > maxDuration-delta {
+			position = maxDuration
+		} else if delta < 0 && position < minDuration-delta {
+			position = minDuration
+		} else {
+			position += delta
+		}
 	}
+	api.seek(clampPosition(position, state.Duration))
 	return nil
 }
 
 func (api *mprisPlayer) SetPosition(trackID dbus.ObjectPath, position int64) *dbus.Error {
-	if trackID == api.trackID() && api.controls.Seek != nil {
-		api.controls.Seek(time.Duration(position) * time.Microsecond)
+	state := api.state()
+	if trackID == trackPath(state) {
+		api.seek(clampPosition(time.Duration(position)*time.Microsecond, state.Duration))
 	}
 	return nil
+}
+
+func clampPosition(position, duration time.Duration) time.Duration {
+	if position < 0 {
+		return 0
+	}
+	if duration > 0 && position > duration {
+		return duration
+	}
+	return position
 }
 
 func (*mprisPlayer) OpenUri(string) *dbus.Error {

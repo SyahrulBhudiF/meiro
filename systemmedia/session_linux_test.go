@@ -126,17 +126,40 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 		t.Error("no Seeked signal after a seek")
 	}
 
-	// Seek is relative: the offset the desktop sends reaches the app as it is.
-	if err := object.Call(playerInterface+".Seek", 0, int64(5*time.Second/time.Microsecond)).Err; err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-seeks:
-		if got != 5*time.Second {
-			t.Errorf("seek offset = %v, want 5s", got)
+	// Seek is relative to the current position, and both Seek and SetPosition
+	// stay within the track.
+	for _, test := range []struct {
+		name   string
+		offset time.Duration
+		want   time.Duration
+	}{
+		{"positive offset", 5 * time.Second, 47 * time.Second},
+		{"negative offset", -50 * time.Second, 0},
+		{"upper clamp", time.Hour, state.Duration},
+	} {
+		if err := object.Call(playerInterface+".Seek", 0, int64(test.offset/time.Microsecond)).Err; err != nil {
+			t.Fatalf("%s: %v", test.name, err)
 		}
-	default:
-		t.Error("Seek was not forwarded to the app")
+		if got := <-seeks; got != test.want {
+			t.Errorf("Seek %s = %v, want %v", test.name, got, test.want)
+		}
+	}
+	trackID := metadata["mpris:trackid"].Value().(dbus.ObjectPath)
+	for _, test := range []struct {
+		name     string
+		position time.Duration
+		want     time.Duration
+	}{
+		{"in range", 12 * time.Second, 12 * time.Second},
+		{"lower clamp", -time.Second, 0},
+		{"upper clamp", 4 * time.Minute, state.Duration},
+	} {
+		if err := object.Call(playerInterface+".SetPosition", 0, trackID, int64(test.position/time.Microsecond)).Err; err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if got := <-seeks; got != test.want {
+			t.Errorf("SetPosition %s = %v, want %v", test.name, got, test.want)
+		}
 	}
 }
 
