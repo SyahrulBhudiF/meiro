@@ -59,6 +59,10 @@ type app struct {
 	// replace it with one that needs no network.
 	newClient func(*youtube.CookieAuth) *youtube.Client
 	store     cookieStore
+	// signInSources lists the browsers a session can be imported from, which
+	// is also where it is read again once YouTube retires its cookie. Tests
+	// replace it with one that needs no browser.
+	signInSources func() []importSource
 	// account is the signed-in account, and accounts the channels it can act
 	// as, for the switcher in its menu.
 	account  youtube.AccountDetails
@@ -254,6 +258,7 @@ func newApp() *app {
 	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
 		return youtube.NewClient(youtube.Options{CookieAuth: auth})
 	}
+	a.signInSources = importSources
 	a.thumbs = newThumbCache(a.refresh)
 	return a
 }
@@ -289,6 +294,7 @@ func main() {
 		// once the window is there.
 		a.restoreAccount()
 		a.startTicker(a.stopTick)
+		a.watchSignIn(a.stopTick)
 		a.win.OnClosed(a.stopTicking)
 	})
 	err := mygo.App.Run()
@@ -589,7 +595,7 @@ func (a *app) syncSystemMedia() {
 	case repeatQueue:
 		loopStatus = "Playlist"
 	}
-	a.systemMedia.Update(systemmedia.State{
+	if err := a.systemMedia.Update(systemmedia.State{
 		VideoID:     a.current.VideoID,
 		Title:       a.current.Title,
 		Artist:      a.current.Subtitle,
@@ -605,7 +611,13 @@ func (a *app) syncSystemMedia() {
 		CanPrevious: a.current.VideoID != "",
 		CanSeek:     a.total > 0 && a.player.Active(),
 		Shuffle:     a.shuffle,
-	})
+	}); err != nil {
+		log.Printf("system media controls unavailable: %v", err)
+		if closeErr := a.systemMedia.Close(); closeErr != nil {
+			log.Printf("close system media controls: %v", closeErr)
+		}
+		a.systemMedia = nil
+	}
 }
 
 // resolveTheme returns the theme to draw this frame with: the one the

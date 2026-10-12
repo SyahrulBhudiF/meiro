@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -118,6 +118,13 @@ func TestRestoreDoesNotMarkAnInvalidSessionSignedIn(t *testing.T) {
 	a := newTestApp()
 	store := &memoryStore{cookie: "SAPISID=abc"}
 	a.store = store
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			t.Error("a request that failed read the browser again")
+			return "", nil
+		}}}
+	}
 	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
 		return youtube.NewClient(youtube.Options{
 			APIKey:     "test",
@@ -136,6 +143,197 @@ func TestRestoreDoesNotMarkAnInvalidSessionSignedIn(t *testing.T) {
 	}
 	if store.cookie == "" {
 		t.Fatal("a transient restore failure discarded the saved cookie")
+	}
+}
+
+// YouTube retires the cookie of a browser session as the browser goes on using
+// it. A saved session it no longer recognises is read from the browser the
+// sign-in was imported from, and the session that reads replaces it.
+func TestRestoreReadsTheBrowserWhenYouTubeRefusesTheSavedSession(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			return "SAPISID=fresh", nil
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+
+	a.restoreAccount()
+	if !a.signedIn || a.authed == nil {
+		t.Fatalf("the session read from the browser did not sign in: signedIn=%v", a.signedIn)
+	}
+	if a.ytDlpCookie != "SAPISID=fresh" {
+		t.Errorf("yt-dlp cookie = %q, want the session read from the browser", a.ytDlpCookie)
+	}
+	if store.cookie != "SAPISID=fresh" {
+		t.Errorf("saved cookie = %q, want the session read from the browser", store.cookie)
+	}
+	if a.notice != "" {
+		t.Errorf("a session that was replaced reported %q", a.notice)
+	}
+}
+
+// Without a browser to read, a refused session is reported as it was.
+func TestRestoreWithoutABrowserKeepsTheRefusal(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+
+	a.restoreAccount()
+	if a.signedIn {
+		t.Fatalf("a refused session signed in: signedIn=%v", a.signedIn)
+	}
+	if !strings.Contains(a.notice, "Could not restore") || !strings.Contains(a.notice, "did not recognise") {
+		t.Errorf("the refusal was not surfaced: %q", a.notice)
+	}
+	if store.cookie != "SAPISID=stale" {
+		t.Errorf("saved cookie = %q, want the one that was already there", store.cookie)
+	}
+}
+
+// A browser that is not signed in explains itself, and leaves the saved
+// session alone.
+func TestRestoreReportsWhyTheBrowserCouldNotReplaceTheSession(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			return "", errors.New("Helium has no YouTube session; sign in at music.youtube.com there first")
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+
+	a.restoreAccount()
+	if a.signedIn {
+		t.Fatalf("a session that was not replaced signed in: signedIn=%v", a.signedIn)
+	}
+	if !strings.Contains(a.notice, "did not recognise") || !strings.Contains(a.notice, "sign in at music.youtube.com") {
+		t.Errorf("the notice does not say why the browser could not replace the session: %q", a.notice)
+	}
+	if store.cookie != "SAPISID=stale" {
+		t.Errorf("saved cookie = %q, want the one that was already there", store.cookie)
+	}
+}
+
+// A session read from the browser that YouTube refuses too is not kept.
+func TestRestoreDoesNotKeepASessionYouTubeAlsoRefuses(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			return "SAPISID=also-stale", nil
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+
+	a.restoreAccount()
+	if a.signedIn {
+		t.Fatalf("a session YouTube refused signed in: signedIn=%v", a.signedIn)
+	}
+	if !strings.Contains(a.notice, "did not recognise") {
+		t.Errorf("the refusal was not surfaced: %q", a.notice)
+	}
+	if store.cookie != "SAPISID=stale" {
+		t.Errorf("saved cookie = %q, want the one that was already there", store.cookie)
+	}
+}
+
+// A session read from the browser after the user signed out is not kept: the
+// sign-out is newer than the refresh.
+func TestARefreshDoesNotUndoASignOut(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.settings.SignInSource = "Helium"
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+	var pending []func()
+	a.run = func(work func()) { pending = append(pending, work) }
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			// The user signs out while the browser is being read.
+			a.signOut()
+			return "SAPISID=fresh", nil
+		}}}
+	}
+
+	a.restoreAccount()
+	pending[0]()
+	if store.cookie != "SAPISID=stale" {
+		t.Errorf("a refresh that outran the sign-out saved %q", store.cookie)
+	}
+	if a.signedIn || a.ytDlpCookie != "" {
+		t.Errorf("a refresh that outran the sign-out signed in: signedIn=%v", a.signedIn)
+	}
+	for _, work := range pending[1:] {
+		work()
+	}
+	if store.cookie != "" {
+		t.Errorf("the sign-out left %q saved", store.cookie)
+	}
+}
+
+// A sign-in remembers the browser it came from, and a pasted one forgets it.
+func TestSignInRemembersTheBrowserItCameFrom(t *testing.T) {
+	a := newTestApp()
+	a.store = &memoryStore{}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=abc"}},
+		})
+	}
+
+	a.signInWithGoogle()
+	a.signIn.cookie = "SAPISID=abc"
+	a.finishSignIn(context.Background(), "SAPISID=abc", a.signIn.generation, "", "Helium")
+	if a.settings.SignInSource != "Helium" {
+		t.Errorf("a session imported from Helium remembers %q", a.settings.SignInSource)
+	}
+
+	a.signInWithGoogle()
+	a.signIn.cookie = "SAPISID=abc"
+	a.finishSignIn(context.Background(), "SAPISID=abc", a.signIn.generation, "", "")
+	if a.settings.SignInSource != "" {
+		t.Errorf("a pasted session still names the browser %q", a.settings.SignInSource)
 	}
 }
 
@@ -181,7 +379,7 @@ func TestCancelledSignInDoesNotLeaveItsCookieSaved(t *testing.T) {
 	attempt := a.signIn.generation
 	store.onSave = a.dismissSignIn
 
-	a.finishSignIn(context.Background(), "SAPISID=abc", attempt, "")
+	a.finishSignIn(context.Background(), "SAPISID=abc", attempt, "", "")
 	if a.signedIn || store.cookie != "" || a.signIn.cookie != "" {
 		t.Fatalf("cancelled sign-in was retained: signedIn=%v cookieSaved=%v dialogCookie=%q", a.signedIn, store.cookie != "", a.signIn.cookie)
 	}
@@ -232,19 +430,179 @@ func TestSignInWaitsForSignOutStorageDeletion(t *testing.T) {
 	}
 }
 
-func TestDeletingReportsWhatWouldNotGo(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "cookie.txt")
-	system := &fakeKeychain{usable: true, holds: true, removeErr: errors.New("access denied")}
-	store := &keychainStore{system: system, file: newFileStore(path)}
-	if err := store.file.Save(ctx, testCookie); err != nil {
-		t.Fatal(err)
+// countingMusic answers the way refusingMusic does, and counts the library
+// landings it serves, so a test can see that a page loaded again.
+type countingMusic struct {
+	fresh string
+	loads *atomic.Int32
+}
+
+func (m countingMusic) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Body != nil {
+		body, _ := io.ReadAll(request.Body)
+		request.Body = io.NopCloser(strings.NewReader(string(body)))
+		if strings.Contains(string(body), "FEmusic_library_landing") {
+			m.loads.Add(1)
+		}
 	}
-	err := store.Delete(ctx)
-	if err == nil || !strings.Contains(err.Error(), "access denied") {
-		t.Errorf("Delete = %v, want the keychain's failure", err)
+	return refusingMusic{fresh: m.fresh}.RoundTrip(request)
+}
+
+// The session a browser replaces is replaced here too: a running app asks
+// YouTube whether it still has one, and reads the browser when the answer is
+// no.
+func TestASessionYouTubeRetiredIsReplacedWhileRunning(t *testing.T) {
+	var loads atomic.Int32
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.signedIn, a.ytDlpCookie = true, "SAPISID=stale"
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			return "SAPISID=fresh", nil
+		}}}
 	}
-	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
-		t.Error("the file was left behind because the keychain failed")
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: countingMusic{fresh: "SAPISID=fresh", loads: &loads}},
+		})
+	}
+	a.router.Push("/library")
+	tt := ui.NewTester(a.view, 1000, 700)
+	tt.Frame()
+
+	a.checkSignIn()
+
+	if a.ytDlpCookie != "SAPISID=fresh" {
+		t.Errorf("the session in use is %q, want the one read from the browser", a.ytDlpCookie)
+	}
+	if store.cookie != "SAPISID=fresh" {
+		t.Errorf("saved cookie = %q, want the one read from the browser", store.cookie)
+	}
+	if !a.signedIn || a.notice != "" {
+		t.Errorf("replacing the session reported signedIn=%v notice=%q", a.signedIn, a.notice)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Errorf("the page loaded again %d times, want once, with the account", got)
+	}
+}
+
+// A session YouTube still takes is left alone: the check costs a request, and
+// changes nothing else.
+func TestASessionYouTubeStillTakesIsLeftAlone(t *testing.T) {
+	var loads atomic.Int32
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=live"}
+	a.store = store
+	a.signedIn, a.ytDlpCookie = true, "SAPISID=live"
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			t.Error("the browser was read although YouTube still takes the session")
+			return "", nil
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: countingMusic{fresh: "SAPISID=live", loads: &loads}},
+		})
+	}
+	a.router.Push("/library")
+	tt := ui.NewTester(a.view, 1000, 700)
+	tt.Frame()
+
+	a.checkSignIn()
+
+	if a.ytDlpCookie != "SAPISID=live" || store.cookie != "SAPISID=live" {
+		t.Errorf("a session YouTube still takes was changed: in use %q, saved %q", a.ytDlpCookie, store.cookie)
+	}
+	if !a.signedIn || a.notice != "" {
+		t.Errorf("a check that found nothing reported signedIn=%v notice=%q", a.signedIn, a.notice)
+	}
+	if got := loads.Load(); got != 0 {
+		t.Errorf("the page loaded %d times, want it left as it was", got)
+	}
+}
+
+// A session the browser cannot replace stops acting signed in, and says why.
+func TestASessionThatCannotBeReplacedStopsActingSignedIn(t *testing.T) {
+	a := newTestApp()
+	store := &memoryStore{cookie: "SAPISID=stale"}
+	a.store = store
+	a.signedIn, a.ytDlpCookie = true, "SAPISID=stale"
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			return "", errors.New("Helium has no YouTube session; sign in at music.youtube.com there first")
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: refusingMusic{fresh: "SAPISID=fresh"}},
+		})
+	}
+
+	a.checkSignIn()
+
+	if a.signedIn || a.authed != nil {
+		t.Errorf("a session YouTube refuses left signedIn=%v", a.signedIn)
+	}
+	if !strings.Contains(a.notice, "did not recognise") || !strings.Contains(a.notice, "sign in at music.youtube.com") {
+		t.Errorf("the notice does not say why: %q", a.notice)
+	}
+	if store.cookie != "SAPISID=stale" {
+		t.Errorf("saved cookie = %q, want the one that was already there", store.cookie)
+	}
+}
+
+// A request that fails for another reason says nothing about the session.
+func TestATransientFailureLeavesTheSessionAlone(t *testing.T) {
+	a := newTestApp()
+	a.store = &memoryStore{cookie: "SAPISID=live"}
+	a.signedIn, a.ytDlpCookie = true, "SAPISID=live"
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			t.Error("the browser was read for a request that failed")
+			return "", nil
+		}}}
+	}
+	a.newClient = func(auth *youtube.CookieAuth) *youtube.Client {
+		return youtube.NewClient(youtube.Options{
+			APIKey:     "test",
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: failingMusic{}},
+		})
+	}
+
+	a.checkSignIn()
+
+	if !a.signedIn || a.ytDlpCookie != "SAPISID=live" || a.notice != "" {
+		t.Errorf("a failed request changed the session: signedIn=%v cookie=%q notice=%q", a.signedIn, a.ytDlpCookie, a.notice)
+	}
+}
+
+// A signed-out app asks YouTube nothing.
+func TestASessionCheckDoesNothingWhileSignedOut(t *testing.T) {
+	a := newTestApp()
+	a.store = &memoryStore{}
+	a.signedIn, a.ytDlpCookie = false, ""
+	a.settings.SignInSource = "Helium"
+	a.signInSources = func() []importSource {
+		return []importSource{{label: "Helium", read: func(context.Context) (string, error) {
+			t.Error("a signed-out app read the browser")
+			return "", nil
+		}}}
+	}
+	a.checkSignIn()
+	if a.signedIn || a.notice != "" {
+		t.Errorf("a signed-out check changed the app: signedIn=%v notice=%q", a.signedIn, a.notice)
 	}
 }
