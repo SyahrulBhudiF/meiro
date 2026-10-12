@@ -56,22 +56,16 @@ func readChromiumCookies(ctx context.Context, profile string, aesKey []byte) (st
 	if database == "" {
 		return "", fmt.Errorf("%s has no cookie database", profile)
 	}
-	// The browser holds its database open, and writes recent cookies to a
-	// journal beside it: both are read from a copy.
+	// SQLite's backup command takes a consistent snapshot, including committed
+	// WAL contents, instead of racing the browser while copying database files.
 	directory, err := mkdirTemp("meiro-cookies-")
 	if err != nil {
 		return "", err
 	}
 	defer removeAll(directory)
 	copied := filepath.Join(directory, "Cookies")
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		err := copyFile(database+suffix, copied+suffix)
-		if errors.Is(err, os.ErrNotExist) && suffix != "" {
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
+	if out, err := command(ctx, sqlite, database, ".backup "+copied).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("snapshot the browser cookie database: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	query := func(statement string) ([]byte, error) {
@@ -81,12 +75,17 @@ func readChromiumCookies(ctx context.Context, profile string, aesKey []byte) (st
 		}
 		return out, nil
 	}
-	version := 0
-	if out, err := query("SELECT value FROM meta WHERE key = 'version'"); err == nil {
-		var rows []struct{ Value string }
-		if json.Unmarshal(out, &rows) == nil && len(rows) > 0 {
-			version, _ = strconv.Atoi(rows[0].Value)
-		}
+	versionJSON, err := query("SELECT value FROM meta WHERE key = 'version'")
+	if err != nil {
+		return "", fmt.Errorf("read the Chromium cookie database version: %w", err)
+	}
+	var versionRows []struct{ Value string }
+	if err := json.Unmarshal(versionJSON, &versionRows); err != nil || len(versionRows) != 1 {
+		return "", errors.New("read the Chromium cookie database version: missing or invalid version")
+	}
+	version, err := strconv.Atoi(versionRows[0].Value)
+	if err != nil || version <= 0 {
+		return "", errors.New("read the Chromium cookie database version: missing or invalid version")
 	}
 	out, err := query("SELECT host_key AS host, name, hex(encrypted_value) AS encrypted, value, expires_utc AS expires FROM cookies WHERE host_key LIKE '%youtube.com'")
 	if err != nil {

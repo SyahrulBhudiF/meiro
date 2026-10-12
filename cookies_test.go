@@ -39,13 +39,29 @@ func TestCookieFromNetscape(t *testing.T) {
 		".youtube.com\tTRUE\t/\tTRUE\t2100000000\tSAPISID\tnewer",
 		"broken line",
 	}, "\n")
-	got := cookieFromNetscape(text, now)
+	got, err := cookieFromNetscape(text, now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := "SAPISID=newer; __Secure-3PSID=def; YSC=session"
 	if got != want {
 		t.Errorf("cookieFromNetscape = %q, want %q", got, want)
 	}
-	if got := cookieFromNetscape("# nothing\n", now); got != "" {
-		t.Errorf("an empty file gave %q", got)
+	if got, err := cookieFromNetscape("# nothing\n", now); err != nil || got != "" {
+		t.Errorf("an empty file gave %q, %v", got, err)
+	}
+}
+
+func TestCookieFromNetscapeLongLine(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0)
+	value := strings.Repeat("x", 1<<20)
+	text := ".youtube.com\tTRUE\t/\tTRUE\t2100000000\tSAPISID\t" + value + "\n"
+	got, err := cookieFromNetscape(text, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "SAPISID=" + value; got != want {
+		t.Fatalf("long cookie length = %d, want %d", len(got), len(want))
 	}
 }
 

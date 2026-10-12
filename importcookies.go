@@ -391,7 +391,11 @@ func ytDlpCookie(ctx context.Context, spec string) (string, error) {
 		"https://music.youtube.com/")
 	output, runErr := command.CombinedOutput()
 	if data, err := os.ReadFile(file); err == nil {
-		if cookie := cookieFromNetscape(string(data), time.Now()); cookie != "" {
+		cookie, parseErr := cookieFromNetscape(string(data), time.Now())
+		if parseErr != nil {
+			return "", parseErr
+		}
+		if cookie != "" {
 			return cookie, nil
 		}
 	}
@@ -418,11 +422,11 @@ func lastError(output string) string {
 // cookieFromNetscape builds the Cookie header a request to
 // music.youtube.com carries from a cookies.txt file: the cookies of
 // youtube.com and its subdomains that have not expired.
-func cookieFromNetscape(text string, now time.Time) string {
+func cookieFromNetscape(text string, now time.Time) (string, error) {
 	var pairs []string
 	seen := map[string]int{}
 	scanner := bufio.NewScanner(strings.NewReader(text))
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), len(text)+1)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		// A cookie only HTTP can read is written as a comment with a marker.
@@ -450,5 +454,8 @@ func cookieFromNetscape(text string, now time.Time) string {
 		seen[name] = len(pairs)
 		pairs = append(pairs, pair)
 	}
-	return strings.Join(pairs, "; ")
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read Netscape cookies: %w", err)
+	}
+	return strings.Join(pairs, "; "), nil
 }
