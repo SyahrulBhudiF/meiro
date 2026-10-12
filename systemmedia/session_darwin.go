@@ -3,9 +3,13 @@
 package systemmedia
 
 import (
+	"context"
 	"errors"
+	"log"
+	"runtime"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/go-macos/objc"
 )
@@ -19,14 +23,19 @@ type macCommand struct {
 }
 
 type macSession struct {
-	mu           sync.Mutex
-	center       objc.ID
-	remote       objc.ID
-	commands     []macCommand
-	state        State
-	hasState     bool
-	infoPosition time.Duration
-	infoAt       time.Time
+	mu            sync.Mutex
+	center        objc.ID
+	remote        objc.ID
+	commands      []macCommand
+	state         State
+	stateUpdated  time.Time
+	hasState      bool
+	infoPosition  time.Duration
+	infoAt        time.Time
+	artwork       objc.ID
+	cancelArtwork context.CancelFunc
+	artworkGen    uint64
+	closed        bool
 }
 
 // New registers metadata and transport commands with macOS Now Playing.
@@ -73,6 +82,9 @@ func (s *macSession) Update(state State) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
 	objc.AutoreleasePool(func() {
 		s.setEnabled("playCommand", state.CanPlay, s.state.CanPlay)
 		s.setEnabled("pauseCommand", state.CanPause, s.state.CanPause)
@@ -80,6 +92,24 @@ func (s *macSession) Update(state State) error {
 		s.setEnabled("nextTrackCommand", state.CanNext, s.state.CanNext)
 		s.setEnabled("previousTrackCommand", state.CanPrevious, s.state.CanPrevious)
 		s.setEnabled("changePlaybackPositionCommand", state.CanSeek, s.state.CanSeek)
+
+		artworkChanged := !s.hasState || state.VideoID != s.state.VideoID || state.ArtworkURL != s.state.ArtworkURL
+		if artworkChanged {
+			if s.cancelArtwork != nil {
+				s.cancelArtwork()
+				s.cancelArtwork = nil
+			}
+			s.artworkGen++
+			if s.artwork != 0 {
+				s.artwork.Send(objc.Sel("release"))
+				s.artwork = 0
+			}
+			if state.VideoID != "" && state.ArtworkURL != "" {
+				ctx, cancel := context.WithCancel(context.Background())
+				s.cancelArtwork = cancel
+				go s.fetchArtwork(ctx, state.ArtworkURL, s.artworkGen)
+			}
+		}
 
 		metadataChanged := !s.hasState || !state.sameMetadata(s.state)
 		statusChanged := !s.hasState || state.Status != s.state.Status
@@ -104,6 +134,7 @@ func (s *macSession) Update(state State) error {
 		}
 	})
 	s.state = state
+	s.stateUpdated = time.Now()
 	s.hasState = true
 	return nil
 }
@@ -136,6 +167,9 @@ func (s *macSession) publishInfo(state State) {
 	if state.Duration > 0 {
 		info.Send(objc.Sel("setObject:forKey:"), number(state.Duration.Seconds()), objc.NSString("playbackDuration"))
 	}
+	if s.artwork != 0 {
+		info.Send(objc.Sel("setObject:forKey:"), s.artwork, objc.NSString("artwork"))
+	}
 	info.Send(objc.Sel("setObject:forKey:"), number(state.Position.Seconds()), objc.NSString("elapsedPlaybackTime"))
 	rate := float64(0)
 	if state.Status == Playing {
@@ -149,9 +183,75 @@ func number(value float64) objc.ID {
 	return objc.ClassID("NSNumber").Send(objc.Sel("numberWithDouble:"), value)
 }
 
+func (s *macSession) fetchArtwork(ctx context.Context, url string, generation uint64) {
+	data, err := loadArtwork(ctx, url)
+	if err != nil {
+		// Artwork failures are intentionally not retried: the next track or URL
+		// change starts a new request, avoiding repeated background traffic.
+		if ctx.Err() == nil {
+			log.Printf("load system media artwork: %v", err)
+		}
+		return
+	}
+	objc.DispatchMain(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.closed || generation != s.artworkGen {
+			return
+		}
+		objc.AutoreleasePool(func() {
+			s.artwork = newMacArtwork(data)
+			if s.artwork == 0 {
+				return
+			}
+			state := s.state
+			if state.Status == Playing {
+				state.Position += time.Since(s.stateUpdated)
+				if state.Duration > 0 && state.Position > state.Duration {
+					state.Position = state.Duration
+				}
+			}
+			s.publishInfo(state)
+		})
+	})
+}
+
+func macImage(data []byte) objc.ID {
+	nsData := objc.ClassID("NSData").Send(objc.Sel("dataWithBytes:length:"), unsafe.Pointer(&data[0]), uintptr(len(data)))
+	runtime.KeepAlive(data)
+	return objc.ClassID("NSImage").Send(objc.Sel("alloc")).Send(objc.Sel("initWithData:"), nsData)
+}
+
+func newMacArtwork(data []byte) objc.ID {
+	image := macImage(data)
+	if image == 0 {
+		return 0
+	}
+	size := objc.Send[objc.NSSize](image, objc.Sel("size"))
+	image.Send(objc.Sel("release"))
+	block := objc.NewBlock(func(_ objc.Block, requested objc.NSSize) objc.ID {
+		image := macImage(data)
+		if image != 0 {
+			image.Send(objc.Sel("setSize:"), requested)
+			image.Send(objc.Sel("autorelease"))
+		}
+		return image
+	})
+	defer block.Release() // The initializer copies its escaping request handler.
+	return objc.ClassID("MPMediaItemArtwork").Send(objc.Sel("alloc")).
+		Send(objc.Sel("initWithBoundsSize:requestHandler:"), size, block)
+}
+
 func (s *macSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.cancelArtwork != nil {
+		s.cancelArtwork()
+	}
 	objc.AutoreleasePool(func() {
 		for _, target := range s.commands {
 			if target.token != 0 {
@@ -162,6 +262,10 @@ func (s *macSession) Close() error {
 		s.commands = nil
 		s.center.Send(objc.Sel("setNowPlayingInfo:"), 0)
 		s.center.Send(objc.Sel("setPlaybackState:"), 3)
+		if s.artwork != 0 {
+			s.artwork.Send(objc.Sel("release"))
+			s.artwork = 0
+		}
 	})
 	return nil
 }
