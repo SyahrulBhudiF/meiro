@@ -89,6 +89,7 @@ func (a *app) playAll() {
 // start makes item the current track and resolves its audio.
 func (a *app) start(item youtube.MusicItem) {
 	changed := a.current.VideoID != item.VideoID
+	a.cancelStream()
 	a.current = item
 	a.total = parseDuration(item.Duration)
 	a.scrub, a.playErr = 0, ""
@@ -329,6 +330,13 @@ func (a *app) setAutoPlay(enabled bool) {
 	a.syncSystemMedia()
 }
 
+func (a *app) cancelStream() {
+	if a.streamStop != nil {
+		a.streamStop()
+		a.streamStop = nil
+	}
+}
+
 // loading reports whether the track chosen is not making sound yet: its audio
 // is being found, or ffmpeg is still opening it.
 func (a *app) loading() bool {
@@ -339,6 +347,9 @@ func (a *app) loading() bool {
 func (a *app) stream(item youtube.MusicItem) {
 	a.streamGen++
 	gen := a.streamGen
+	a.cancelStream()
+	ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+	a.streamStop = cancel
 	a.resolving = true
 	cookie := a.ytDlpCookie
 	log.Printf("playback: resolving video_id=%s signed_in=%t", item.VideoID, cookie != "")
@@ -358,7 +369,7 @@ func (a *app) stream(item youtube.MusicItem) {
 			}
 		} else {
 			var resolved time.Duration
-			streamURL, resolved, err = a.streams.get(item.VideoID, cookie)
+			streamURL, resolved, err = a.streams.get(ctx, item.VideoID, cookie)
 			if resolved > 0 {
 				total = resolved
 			}
@@ -367,6 +378,7 @@ func (a *app) stream(item youtube.MusicItem) {
 			if gen != a.streamGen {
 				return // another track was chosen while this one resolved
 			}
+			a.cancelStream()
 			a.resolving = false
 			if err != nil {
 				log.Printf("playback: audio resolution failed video_id=%s: %v", item.VideoID, err)
@@ -415,7 +427,9 @@ func (a *app) warmNext() {
 	}
 	cache, cookie := a.currentAudioCache(), a.ytDlpCookie
 	a.run(func() {
-		streamURL, _, err := a.streams.get(next.VideoID, cookie)
+		ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+		defer cancel()
+		streamURL, _, err := a.streams.get(ctx, next.VideoID, cookie)
 		if err != nil {
 			log.Printf("playback: could not resolve next video_id=%s: %v", next.VideoID, err)
 			return

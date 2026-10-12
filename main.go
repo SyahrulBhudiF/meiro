@@ -191,8 +191,9 @@ type app struct {
 	// resolving is set from the moment a track is chosen until its audio URL
 	// is found, and streamGen numbers those requests, so that only the latest
 	// one plays when it lands.
-	resolving bool
-	streamGen int
+	resolving  bool
+	streamGen  int
+	streamStop context.CancelFunc
 	// streams remembers resolved audio URLs, including those of tracks
 	// resolved ahead of their turn.
 	streams *streamCache
