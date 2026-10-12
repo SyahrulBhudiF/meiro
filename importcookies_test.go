@@ -1,12 +1,35 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
 )
+
+func TestFirstSessionSkipsUnsignedAndFailedProfiles(t *testing.T) {
+	var tried []string
+	got, err := firstSession(context.Background(), "Browser", []string{"failed", "signed-out", "signed-in"}, func(_ context.Context, place string) (string, error) {
+		tried = append(tried, place)
+		switch place {
+		case "failed":
+			return "", errors.New("profile locked")
+		case "signed-out":
+			return "PREF=1", nil
+		default:
+			return "SAPISID=valid", nil
+		}
+	})
+	if err != nil || got != "SAPISID=valid" {
+		t.Fatalf("firstSession = %q, %v", got, err)
+	}
+	if len(tried) != 3 || tried[0] != "failed" || tried[1] != "signed-out" || tried[2] != "signed-in" {
+		t.Fatalf("profiles tried = %v", tried)
+	}
+}
 
 func TestChromiumSpecNamesTheKeyring(t *testing.T) {
 	// yt-dlp does not find a Chromium browser's cookie key under a keyring it

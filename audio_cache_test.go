@@ -17,19 +17,27 @@ import (
 
 func TestAudioCacheDownloadsTheOriginalAudio(t *testing.T) {
 	args := audioCacheDownloadArgs("video-id", t.TempDir(), "--cookies", "cookies.txt")
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "-f bestaudio") {
-		t.Errorf("yt-dlp options do not request the best audio: %s", joined)
+	if len(args) < 2 || args[0] != "-f" || args[1] != "bestaudio" {
+		t.Fatalf("yt-dlp format arguments = %q, want -f bestaudio", args)
 	}
-	// The cache keeps what YouTube serves. Transcoding or remuxing it spends
-	// CPU and loses quality for metadata the player never reads.
-	for _, unwanted := range []string{"--extract-audio", "--audio-format", "--audio-quality", "--embed-metadata"} {
-		if strings.Contains(joined, unwanted) {
-			t.Errorf("yt-dlp still post-processes the cached audio (%s): %s", unwanted, joined)
+	cookieFound := false
+	for i, arg := range args[:len(args)-1] {
+		if arg == "--cookies" && args[i+1] == "cookies.txt" {
+			cookieFound = true
 		}
 	}
-	if got := args[len(args)-1]; got != "https://music.youtube.com/watch?v=video-id" {
-		t.Errorf("yt-dlp URL = %q, want it after all options", got)
+	if !cookieFound {
+		t.Fatalf("yt-dlp arguments %q omit cookie option", args)
+	}
+	if got, want := args[len(args)-1], "https://music.youtube.com/watch?v=video-id"; got != want {
+		t.Errorf("yt-dlp URL = %q, want %q", got, want)
+	}
+	for _, value := range []string{"--extract-audio", "--audio-format", "--audio-quality", "--embed-metadata"} {
+		for _, arg := range args {
+			if arg == value {
+				t.Errorf("yt-dlp post-processes the cached audio with %q", value)
+			}
+		}
 	}
 }
 

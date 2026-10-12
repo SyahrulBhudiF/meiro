@@ -15,6 +15,17 @@ import (
 	"github.com/elianiva/meiro/youtube"
 )
 
+func TestStreamReportsResolveFailure(t *testing.T) {
+	a := newTestApp()
+	a.streams = newStreamCache(func(context.Context, string, string) (string, time.Duration, error) {
+		return "", 0, errors.New("resolve failed")
+	})
+	a.stream(youtube.MusicItem{VideoID: "broken"})
+	if a.playErr != "resolve failed" || a.resolving {
+		t.Fatalf("resolve failure: error=%q resolving=%v", a.playErr, a.resolving)
+	}
+}
+
 func TestAutoplayQueueIsBoundedWithoutReplacingCurrentTrack(t *testing.T) {
 	a := newTestApp()
 	a.queue = make([]youtube.MusicItem, autoplayQueueLimit+1)

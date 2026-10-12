@@ -24,6 +24,38 @@ func fakeYtDlp(t *testing.T, script string) {
 	t.Setenv("TMPDIR", t.TempDir())
 }
 
+func TestDownloadAudioSkipsPartialFiles(t *testing.T) {
+	fakeYtDlp(t, `
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -P) dir="$2"; shift ;;
+  esac
+  shift
+done
+echo partial > "$dir/audio.webm.part"
+echo complete > "$dir/audio.m4a"
+`)
+	path, err := downloadAudio(context.Background(), "vid", t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "audio.m4a" {
+		t.Fatalf("selected %q, want completed audio.m4a", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "complete\n" {
+		t.Fatalf("selected file contents = %q, %v", data, err)
+	}
+}
+
+func TestDownloadAudioReportsLastYtDlpError(t *testing.T) {
+	fakeYtDlp(t, `echo 'ERROR: first failure' >&2; echo 'ERROR: final failure' >&2; exit 1`)
+	_, err := downloadAudio(context.Background(), "vid", t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), "final failure") || strings.Contains(err.Error(), "first failure") {
+		t.Fatalf("downloadAudio error = %v, want final yt-dlp diagnostic", err)
+	}
+}
+
 func TestDownloadAudioKeepsPercentPathsOutOfTheTemplate(t *testing.T) {
 	// The fake saves the file where -P and -o say, as yt-dlp does, and fails
 	// when the template carries the directory.
@@ -102,6 +134,35 @@ wait
 	}
 	if left, _ := os.ReadDir(cacheDir); len(left) != 0 {
 		t.Errorf("cache directory not cleaned: %v", left)
+	}
+}
+
+func TestYtDlpStreamResolvesURLAndRemovesCookies(t *testing.T) {
+	fakeYtDlp(t, `
+while [ $# -gt 0 ]; do
+  if [ "$1" = --cookies ]; then
+    cookie_file="$2"
+    shift
+  fi
+  shift
+done
+[ -n "$cookie_file" ] || { echo 'ERROR: missing cookies' >&2; exit 1; }
+grep -q 'SID.*abc' "$cookie_file" || { echo 'ERROR: bad cookies' >&2; exit 1; }
+printf 'https://media.invalid/audio?dur=12.5\n'
+`)
+	streamURL, total, err := ytDlpStream(context.Background(), "vid", "SID=abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if streamURL != "https://media.invalid/audio?dur=12.5" || total != 12500*time.Millisecond {
+		t.Fatalf("ytDlpStream = %q, %v, want URL and 12.5s", streamURL, total)
+	}
+	root, err := tempRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := os.ReadDir(root); len(left) != 0 {
+		t.Errorf("temporary cookie files remain: %v", left)
 	}
 }
 
