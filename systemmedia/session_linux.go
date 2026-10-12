@@ -74,6 +74,9 @@ func New(controls Controls) (Session, error) {
 		return closeOnError(fmt.Errorf("export MPRIS properties: %w", err))
 	}
 	s.props = properties
+	if err := conn.Export(&mprisProperties{Properties: properties, session: s}, objectPath, "org.freedesktop.DBus.Properties"); err != nil {
+		return closeOnError(fmt.Errorf("export MPRIS metadata properties: %w", err))
+	}
 	playerMethods := introspect.Methods(api)
 	for i := range playerMethods {
 		if playerMethods[i].Name == "SeekBy" {
@@ -196,8 +199,12 @@ func (s *linuxSession) Update(state State) error {
 		}
 	}
 	if metadataChanged {
-		if err := s.setProperty("Metadata", trackMetadata(state)); err != nil {
-			return s.fail(err)
+		// prop.Properties updates map values in place, preserving keys that a
+		// subsequent track omits. Send the complete replacement explicitly;
+		// mprisProperties serves the same snapshot to property readers.
+		if err := s.conn.Emit(objectPath, "org.freedesktop.DBus.Properties.PropertiesChanged",
+			playerInterface, map[string]dbus.Variant{"Metadata": dbus.MakeVariant(trackMetadata(state))}, []string{}); err != nil {
+			return s.fail(fmt.Errorf("publish MPRIS metadata: %w", err))
 		}
 	}
 	if !s.hasState || state.Volume != s.state.Volume {
@@ -272,6 +279,33 @@ func propertyValue(state State, property string) bool {
 	default:
 		return false
 	}
+}
+
+// mprisProperties delegates scalar properties to prop.Properties but returns
+// freshly constructed metadata, so optional fields from an earlier track do
+// not survive a later Get or GetAll request.
+type mprisProperties struct {
+	*prop.Properties
+	session *linuxSession
+}
+
+func (p *mprisProperties) Get(iface, property string) (dbus.Variant, *dbus.Error) {
+	if iface == playerInterface && property == "Metadata" {
+		p.session.mu.Lock()
+		defer p.session.mu.Unlock()
+		return dbus.MakeVariant(trackMetadata(p.session.state)), nil
+	}
+	return p.Properties.Get(iface, property)
+}
+
+func (p *mprisProperties) GetAll(iface string) (map[string]dbus.Variant, *dbus.Error) {
+	values, err := p.Properties.GetAll(iface)
+	if err == nil && iface == playerInterface {
+		p.session.mu.Lock()
+		values["Metadata"] = dbus.MakeVariant(trackMetadata(p.session.state))
+		p.session.mu.Unlock()
+	}
+	return values, err
 }
 
 func trackMetadata(state State) map[string]dbus.Variant {
