@@ -297,6 +297,15 @@ func (a *app) card(c *ui.Context, item youtube.MusicItem, queue []youtube.MusicI
 		radius := artRadius(item, m3.LargeIncreased)
 		opening := a.opening == itemKey("open", item)+"\x00"+list+"#"+strconv.Itoa(position)
 		m3.Art(c, a.thumbs.bitmapIf(item.Thumbnail, 320, fetchArtwork), cardArt, radius, func() {
+			if isNewPlaylist(item) {
+				// The tile has no artwork of its own: the plus covers the
+				// panel a missing one stands in with.
+				ui.Box(c).Size(cardArt, cardArt).Attach(ui.AnchorTopLeft, ui.AnchorTopLeft).
+					Background(sc.SurfaceContainerHighest).Center().Children(func() {
+					ui.Icon(c, m3.IconAdd).FontSize(max(cardArt*0.4, 18)).TextColor(sc.OnSurfaceVariant)
+				})
+				return
+			}
 			if isVideo(item) {
 				m3.VideoBadge(c, cardArt)
 			}
@@ -318,7 +327,9 @@ func (a *app) card(c *ui.Context, item youtube.MusicItem, queue []youtube.MusicI
 			if hovered && (kind == pageTrack || kind == pageAlbum || kind == pagePlaylist) {
 				fab := m3.FAB(c, m3.FABSpec{Icon: m3.IconPlay, Size: m3.FABSmall, Tone: m3.FABPrimary, Key: "play"}).
 					Attach(ui.AnchorBottomRight, ui.AnchorBottomRight).Right(8).Bottom(8)
-				fab.Transition(ui.ElementTransition{Enter: &ui.Motion{Y: 8}, Duration: m3.SpatialFast.Duration(), Ease: m3.SpatialFast.Ease()})
+				enter := m3.Move(m3.SpatialFast)
+				enter.Enter = &ui.Motion{Y: 8, Scale: 0.85}
+				fab.Transition(enter)
 				if fab.Clicked() {
 					played = true
 				}
@@ -348,7 +359,9 @@ func (a *app) card(c *ui.Context, item youtube.MusicItem, queue []youtube.MusicI
 		// The card's button also receives this pointer event. Opening its menu
 		// must not activate the card underneath it.
 	case played:
-		a.playCollection(item, list, position)
+		a.playCollection(item, list, position, false)
+	case card.Clicked() && isNewPlaylist(item):
+		a.openNewPlaylist()
 	case card.Clicked():
 		a.activate(item, queue)
 	}
@@ -380,6 +393,10 @@ func (a *app) cardMenu(c *ui.Context, anchor ui.Element, key string, item youtub
 		}
 		if label != "" && m3.MenuItem(c, label, icon).Clicked() {
 			a.activate(item, queue)
+			close()
+		}
+		if kind == pagePlaylist && m3.MenuItem(c, "Shuffle play", m3.IconShuffle).Clicked() {
+			a.playCollection(item, "", 0, true)
 			close()
 		}
 		if id != "" && m3.MenuItem(c, "Copy link", m3.IconCopy).Clicked() {

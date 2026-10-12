@@ -54,6 +54,9 @@ func (a *app) playWithOptions(item youtube.MusicItem, queue []youtube.MusicItem,
 		a.ensureUpNext()
 		return // this track is already on its way
 	}
+	if a.shuffle {
+		a.shuffleQueue()
+	}
 	a.start(item)
 }
 
@@ -85,6 +88,8 @@ func (a *app) playAll() {
 
 // start makes item the current track and resolves its audio.
 func (a *app) start(item youtube.MusicItem) {
+	changed := a.current.VideoID != item.VideoID
+	a.cancelStream()
 	a.current = item
 	a.total = parseDuration(item.Duration)
 	a.scrub, a.playErr = 0, ""
@@ -92,6 +97,10 @@ func (a *app) start(item youtube.MusicItem) {
 	a.stream(item)
 	a.ensureUpNext()
 	a.loadPanel()
+	if changed {
+		a.recordHistory(item)
+		a.trackNotification(item)
+	}
 	a.syncSystemMedia()
 }
 
@@ -107,19 +116,33 @@ func (a *app) ensureUpNext() {
 	}
 	continuation := ""
 	if a.upNextFetched {
-		if a.upNextToken == "" || len(a.queue)-a.index > 2 {
-			return
-		}
-		continuation = a.upNextToken
-		if a.upNextSeen == nil {
+		switch {
+		case a.upNextToken == "":
+			// Everything the recommendations held has been played out, so
+			// there is nothing to continue. At the end of the queue that is
+			// where the music stopped: ask again from the track that is
+			// playing, which is what keeps the queue going.
+			if len(a.queue)-a.index > 1 {
+				return
+			}
+			a.upNextFetched = false
 			a.upNextSeen = make(map[string]struct{})
-		}
-		if _, seen := a.upNextSeen[continuation]; seen {
-			a.upNextToken = ""
+			a.upNextOptions.VideoID = a.current.VideoID
+		case len(a.queue)-a.index > 2:
 			return
+		default:
+			continuation = a.upNextToken
+			if a.upNextSeen == nil {
+				a.upNextSeen = make(map[string]struct{})
+			}
+			if _, seen := a.upNextSeen[continuation]; seen {
+				a.upNextToken = ""
+				return
+			}
+			a.upNextSeen[continuation] = struct{}{}
 		}
-		a.upNextSeen[continuation] = struct{}{}
-	} else {
+	}
+	if !a.upNextFetched {
 		a.upNextFetched = true
 	}
 	a.upNextLoading = true
@@ -163,11 +186,16 @@ func (a *app) ensureUpNext() {
 			}
 			a.appendRecommendations(result.Items)
 			if a.waitingForAuto {
-				if a.index+1 < len(a.queue) {
+				switch {
+				case a.index+1 < len(a.queue):
 					a.waitingForAuto = false
 					a.advance()
-				} else {
-					a.ensureUpNext()
+				case continuation != "":
+					a.ensureUpNext() // the list had more to pull
+				default:
+					// A fresh request found nothing to follow the queue with.
+					a.waitingForAuto = false
+					a.stopAtQueueEnd()
 				}
 			}
 		})
@@ -302,6 +330,13 @@ func (a *app) setAutoPlay(enabled bool) {
 	a.syncSystemMedia()
 }
 
+func (a *app) cancelStream() {
+	if a.streamStop != nil {
+		a.streamStop()
+		a.streamStop = nil
+	}
+}
+
 // loading reports whether the track chosen is not making sound yet: its audio
 // is being found, or ffmpeg is still opening it.
 func (a *app) loading() bool {
@@ -312,6 +347,9 @@ func (a *app) loading() bool {
 func (a *app) stream(item youtube.MusicItem) {
 	a.streamGen++
 	gen := a.streamGen
+	a.cancelStream()
+	ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+	a.streamStop = cancel
 	a.resolving = true
 	cookie := a.ytDlpCookie
 	log.Printf("playback: resolving video_id=%s signed_in=%t", item.VideoID, cookie != "")
@@ -331,7 +369,7 @@ func (a *app) stream(item youtube.MusicItem) {
 			}
 		} else {
 			var resolved time.Duration
-			streamURL, resolved, err = a.streams.get(item.VideoID, cookie)
+			streamURL, resolved, err = a.streams.get(ctx, item.VideoID, cookie)
 			if resolved > 0 {
 				total = resolved
 			}
@@ -340,6 +378,7 @@ func (a *app) stream(item youtube.MusicItem) {
 			if gen != a.streamGen {
 				return // another track was chosen while this one resolved
 			}
+			a.cancelStream()
 			a.resolving = false
 			if err != nil {
 				log.Printf("playback: audio resolution failed video_id=%s: %v", item.VideoID, err)
@@ -388,7 +427,9 @@ func (a *app) warmNext() {
 	}
 	cache, cookie := a.currentAudioCache(), a.ytDlpCookie
 	a.run(func() {
-		streamURL, _, err := a.streams.get(next.VideoID, cookie)
+		ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+		defer cancel()
+		streamURL, _, err := a.streams.get(ctx, next.VideoID, cookie)
 		if err != nil {
 			log.Printf("playback: could not resolve next video_id=%s: %v", next.VideoID, err)
 			return
@@ -619,7 +660,10 @@ func (a *app) advance() {
 		a.start(a.queue[a.index])
 		return
 	}
-	if a.settings.AutoPlay && (a.upNextLoading || !a.upNextFetched || a.upNextToken != "") {
+	if a.settings.AutoPlay {
+		// The queue is over and the music should not be. Wait for what
+		// YouTube has to follow it with, which ensureUpNext asks for when the
+		// recommendations pulled so far have been played out.
 		a.waitingForAuto = true
 		a.player.Stop()
 		a.syncSystemMedia()
@@ -642,12 +686,18 @@ func (a *app) stopAtQueueEnd() {
 // has only just started.
 func (a *app) previous() {
 	if a.index == 0 || a.player.Position() > 3*time.Second {
-		a.player.Seek(0)
-		a.syncSystemMedia()
+		a.seek(0)
 		return
 	}
 	a.index--
 	a.start(a.queue[a.index])
+}
+
+// seek distinguishes an explicit position change from normal playback progress.
+func (a *app) seek(position time.Duration) {
+	a.player.Seek(position)
+	a.seekVersion++
+	a.syncSystemMedia()
 }
 
 // togglePlay pauses a playing track, resumes a paused one, and starts the
@@ -679,16 +729,53 @@ func clock(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }
 
-// shufflePage turns shuffle on and plays the page from a song picked at
-// random.
+// shufflePage turns shuffle on and plays the page from a track drawn at
+// random, with the whole page arranged behind it.
 func (a *app) shufflePage() {
 	if len(a.playable) == 0 {
 		return
 	}
 	a.shuffle = true
-	i := rand.IntN(len(a.playable))
-	options, source := a.playbackQueueOptions(i)
-	a.playWithOptions(a.playable[i], a.playable, i, options, source)
+	// The track drawn opens the queue, and the rest of the page is arranged
+	// behind it. The position the playlist is read from goes with the draw, so
+	// the queue YouTube is asked for follows the same track.
+	start := rand.IntN(len(a.playable))
+	rest := make([]youtube.MusicItem, 0, len(a.playable)-1)
+	rest = append(rest, a.playable[:start]...)
+	rest = append(rest, a.playable[start+1:]...)
+	rand.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
+	queue := append([]youtube.MusicItem{a.playable[start]}, rest...)
+	options, source := a.playbackQueueOptions(start)
+	a.playWithOptions(queue[0], queue, 0, options, source)
+}
+
+// shuffleQueue arranges the tracks of the queue that are still to play in a
+// random order, once: from there the queue moves from each track to the next.
+// The track playing, the tracks already played, and the generated tracks at the
+// end of the queue stay where they are.
+func (a *app) shuffleQueue() {
+	limit := len(a.queue)
+	if a.recommendationStart >= 0 && a.recommendationStart < limit {
+		limit = a.recommendationStart
+	}
+	start := a.index + 1
+	if start < 0 || start >= limit {
+		return
+	}
+	rand.Shuffle(limit-start, func(i, j int) {
+		a.queue[start+i], a.queue[start+j] = a.queue[start+j], a.queue[start+i]
+	})
+}
+
+// setShuffle turns shuffle on or off. Turning it on arranges what is still to
+// play, and the queue then plays in that order to its end, where auto-play
+// takes over. Turning it off leaves the queue in the order it reached.
+func (a *app) setShuffle(on bool) {
+	a.shuffle = on
+	if on {
+		a.shuffleQueue()
+	}
+	a.syncSystemMedia()
 }
 
 // setVolume sets the volume, from 0 to 100, and keeps it for the next run.

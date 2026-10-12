@@ -95,6 +95,14 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 	if err := statusValue.Store(&status); err != nil || status != string(Playing) {
 		t.Errorf("MPRIS status = %q, err %v; want %q", status, err, Playing)
 	}
+	var volume float64
+	volumeValue, err := object.GetProperty(playerInterface + ".Volume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := volumeValue.Store(&volume); err != nil || volume != state.Volume {
+		t.Errorf("initial MPRIS volume = %v, err %v; want %v", volume, err, state.Volume)
+	}
 	var position int64
 	positionValue, err := object.GetProperty(playerInterface + ".Position")
 	if err != nil {
@@ -142,6 +150,65 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 	}
 	if got := <-seeks; got != 12*time.Second {
 		t.Errorf("SetPosition requested %v, want 12s", got)
+	}
+	signals := make(chan *dbus.Signal, 4)
+	client.Signal(signals)
+	if err := client.AddMatchSignal(
+		dbus.WithMatchInterface(playerInterface),
+		dbus.WithMatchMember("Seeked"),
+		dbus.WithMatchObjectPath(objectPath),
+	); err != nil {
+		t.Fatal(err)
+	}
+	state.Position = 13 * time.Second
+	state.SeekVersion++
+	if err := linux.Update(state); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case signal := <-signals:
+		var position int64
+		if err := dbus.Store(signal.Body, &position); err != nil || position != int64(state.Position/time.Microsecond) {
+			t.Errorf("Seeked signal = %v, %v; want %v", signal.Body, err, state.Position/time.Microsecond)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing Seeked signal")
+	}
+	if err := client.AddMatchSignal(
+		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+		dbus.WithMatchMember("PropertiesChanged"),
+		dbus.WithMatchObjectPath(objectPath),
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range []float64{0.2, 0.9, 0.83} {
+		state.Volume = volume
+		if err := linux.Update(state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case signal := <-signals:
+		t.Fatalf("volume published before coalescing interval: %s", signal.Name)
+	case <-time.After(volumeInterval / 2):
+	}
+	select {
+	case signal := <-signals:
+		var iface string
+		var changes map[string]dbus.Variant
+		var invalidated []string
+		if err := dbus.Store(signal.Body, &iface, &changes, &invalidated); err != nil {
+			t.Fatal(err)
+		}
+		volume, ok := changes["Volume"]
+		if !ok {
+			t.Fatalf("coalesced change omitted Volume: %+v", changes)
+		}
+		if got := volume.Value(); iface != playerInterface || got != 0.83 {
+			t.Errorf("coalesced volume = %v on %s, want 0.83 on %s", got, iface, playerInterface)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing coalesced volume signal")
 	}
 	if err := object.Call("org.freedesktop.DBus.Properties.Set", 0, playerInterface, "Volume", dbus.MakeVariant(0.4)).Err; err != nil {
 		t.Fatal(err)
@@ -205,4 +272,104 @@ func TestMPRISSetPropertyDoesNotHideRuntimePanics(t *testing.T) {
 		}
 	}()
 	_ = (&linuxSession{}).setProperty("PlaybackStatus", string(Playing))
+}
+
+func TestMPRISMetadataRemovalsArePublishedAndReadable(t *testing.T) {
+	if os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
+		t.Skip("run under dbus-run-session to exercise the MPRIS D-Bus service")
+	}
+
+	session, err := New(Controls{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	state := State{
+		VideoID: "video-1", Title: "A song", Artist: "An artist",
+		ArtworkURL: "https://example.test/art.jpg", Duration: 3 * time.Minute,
+		Status: Playing,
+	}
+	if err := session.Update(state); err != nil {
+		t.Fatal(err)
+	}
+
+	client, err := dbus.ConnectSessionBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.AddMatchSignal(dbus.WithMatchObjectPath(objectPath)); err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan *dbus.Signal, 1)
+	client.Signal(signals)
+	object := client.Object(session.(*linuxSession).busName, objectPath)
+
+	state.VideoID, state.Title, state.Artist, state.ArtworkURL, state.Duration = "", "", "", "", 0
+	if err := session.Update(state); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case signal := <-signals:
+		if signal.Name != "org.freedesktop.DBus.Properties.PropertiesChanged" {
+			t.Fatalf("signal = %s, want PropertiesChanged", signal.Name)
+		}
+		var iface string
+		var changes map[string]dbus.Variant
+		var invalidated []string
+		if err := dbus.Store(signal.Body, &iface, &changes, &invalidated); err != nil {
+			t.Fatal(err)
+		}
+		if iface != playerInterface || len(changes) != 1 || len(invalidated) != 0 {
+			t.Fatalf("unexpected property changes: %+v", signal.Body)
+		}
+		var metadata map[string]dbus.Variant
+		if err := changes["Metadata"].Store(&metadata); err != nil {
+			t.Fatal(err)
+		}
+		assertEmptyMPRISMetadata(t, metadata)
+	case <-time.After(time.Second):
+		t.Fatal("missing Metadata PropertiesChanged signal")
+	}
+
+	value, err := object.GetProperty(playerInterface + ".Metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]dbus.Variant
+	if err := value.Store(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	assertEmptyMPRISMetadata(t, metadata)
+
+	var properties map[string]dbus.Variant
+	if err := object.Call("org.freedesktop.DBus.Properties.GetAll", 0, playerInterface).Store(&properties); err != nil {
+		t.Fatal(err)
+	}
+	metadata = nil
+	if err := properties["Metadata"].Store(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	assertEmptyMPRISMetadata(t, metadata)
+}
+
+func assertEmptyMPRISMetadata(t *testing.T, metadata map[string]dbus.Variant) {
+	t.Helper()
+	if len(metadata) != 1 {
+		t.Fatalf("metadata = %+v, want only mpris:trackid", metadata)
+	}
+	if _, ok := metadata["mpris:trackid"]; !ok {
+		t.Errorf("metadata = %+v, missing mpris:trackid", metadata)
+	}
+	for _, key := range []string{"xesam:title", "xesam:artist", "mpris:length", "mpris:artUrl"} {
+		if _, ok := metadata[key]; ok {
+			t.Errorf("metadata retained %s: %+v", key, metadata)
+		}
+	}
 }

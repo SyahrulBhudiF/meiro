@@ -5,10 +5,9 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -161,79 +160,6 @@ func TestFailureReportsAnErrorAfterSound(t *testing.T) {
 	})
 }
 
-// ffmpeg exits while samples are still in the pipe; the reader must still get
-// all of them, and then the end.
-func TestSessionReadsEverythingAfterTheProcessExits(t *testing.T) {
-	const size = 1 << 20
-	cmd := exec.Command("head", "-c", strconv.Itoa(size), "/dev/zero")
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	s := &session{
-		cmd: cmd, pipe: pipe, stderr: &boundedBuffer{limit: 16},
-		source: newCountingReader(pipe), done: make(chan struct{}), quit: make(chan struct{}),
-	}
-	p := &Player{session: s}
-	go p.reap(s)
-
-	// Take all but the last few bytes, and let the process exit with those
-	// still in the pipe, as ffmpeg does a moment before the track ends.
-	head := make([]byte, size-1024)
-	if _, err := io.ReadFull(s.source, head); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(300 * time.Millisecond)
-	rest, err := io.ReadAll(s.source)
-	if err != nil || len(rest) != 1024 {
-		t.Fatalf("read %d of the last 1024 bytes, err %v", len(rest), err)
-	}
-	if !s.source.eof.Load() {
-		t.Error("the end of the stream was not reached")
-	}
-	select {
-	case <-s.done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("the process was never reaped")
-	}
-	if got := p.Failure(); got != "" {
-		t.Errorf("failure %q after a clean end", got)
-	}
-}
-
-// Stopping must not wait for ffmpeg: a stream that has stalled keeps oto's read
-// blocked on the pipe, and the user pressing next is on the main thread.
-func TestStopDoesNotWaitForAStalledStream(t *testing.T) {
-	script := filepath.Join(t.TempDir(), "ffmpeg")
-	body := "#!/bin/sh\nhead -c 4096 /dev/zero\nexec sleep 60\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	p := New(WithFFmpeg(script))
-	if _, err := p.audio.context(); err != nil {
-		t.Skipf("no audio device: %v", err)
-	}
-	if err := p.Play("http://example.invalid/stalled"); err != nil {
-		t.Fatal(err)
-	}
-	// Let oto take the bytes there are and block on the rest.
-	time.Sleep(300 * time.Millisecond)
-
-	stopped := make(chan struct{})
-	go func() {
-		p.Stop()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-	case <-time.After(3 * time.Second):
-		t.Fatal("Stop is waiting for ffmpeg")
-	}
-}
-
 // ffmpeg's reconnect and user-agent options belong to the HTTP protocol. A
 // cached track is a local file, and ffmpeg refuses to open an input when it
 // is given an option its protocol does not define, so a cached track used to
@@ -286,26 +212,321 @@ func TestIsHTTPRecognisesOnlyTheStreamingSchemes(t *testing.T) {
 }
 
 type fakeOutput struct {
-	err     error
-	playing bool
+	mu       sync.Mutex
+	err      error
+	reader   io.Reader
+	playing  bool
+	buffered int
+	stopped  bool
 }
 
-func (f *fakeOutput) Play()                { f.playing = true }
-func (f *fakeOutput) Pause()               { f.playing = false }
-func (f *fakeOutput) SetVolume(float64)    {}
-func (f *fakeOutput) BufferedSize() int    { return 0 }
-func (f *fakeOutput) IsPlaying() bool      { return f.playing }
-func (f *fakeOutput) PauseAndStopReading() {}
-func (f *fakeOutput) Err() error           { return f.err }
+func (f *fakeOutput) Play() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.playing = true
+}
 
-type fakeDevice struct{ err error }
+func (f *fakeOutput) Pause() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.playing = false
+}
 
-func (fakeDevice) newPlayer(io.Reader) output { return &fakeOutput{} }
-func (d fakeDevice) Err() error               { return d.err }
+func (f *fakeOutput) SetVolume(float64) {}
+
+func (f *fakeOutput) BufferedSize() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.buffered
+}
+
+func (f *fakeOutput) IsPlaying() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.playing
+}
+
+func (f *fakeOutput) PauseAndStopReading() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.playing = false
+	f.stopped = true
+}
+
+func (f *fakeOutput) Err() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err
+}
+
+func (f *fakeOutput) setBuffered(size int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.buffered = size
+}
+
+func (f *fakeOutput) setError(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+func (f *fakeOutput) drain(t *testing.T) {
+	t.Helper()
+	if _, err := io.Copy(io.Discard, f.reader); err != nil {
+		t.Fatal(err)
+	}
+	f.Pause()
+}
+
+type fakeDevice struct {
+	mu      sync.Mutex
+	err     error
+	outputs []*fakeOutput
+}
+
+func (d *fakeDevice) newPlayer(reader io.Reader) output {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := &fakeOutput{reader: reader}
+	d.outputs = append(d.outputs, out)
+	return out
+}
+
+func (d *fakeDevice) Err() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.err
+}
+
+func (d *fakeDevice) lastOutput(t *testing.T) *fakeOutput {
+	t.Helper()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.outputs) == 0 {
+		t.Fatal("ffmpeg started without creating an output")
+	}
+	return d.outputs[len(d.outputs)-1]
+}
+
+func fakeAudio(fake *fakeDevice) *sharedAudio {
+	return &sharedAudio{open: func() (device, error) { return fake, nil }}
+}
+
+func testFFmpeg(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func newTestPlayer(t *testing.T, script string) (*Player, *fakeDevice) {
+	t.Helper()
+	device := &fakeDevice{}
+	p := New(WithFFmpeg(script), withAudio(fakeAudio(device)))
+	t.Cleanup(p.Stop)
+	return p, device
+}
+
+func sessionOf(t *testing.T, p *Player) *session {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.session == nil {
+		t.Fatal("player has no session")
+	}
+	return p.session
+}
+
+func waitClosed(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the ffmpeg process to exit")
+	}
+}
+
+func waitForFailure(t *testing.T, p *Player) string {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if failure := p.Failure(); failure != "" {
+			return failure
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("timed out waiting for player failure")
+		case <-tick.C:
+		}
+	}
+}
+
+func waitForFile(t *testing.T, path string) []byte {
+	t.Helper()
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return data
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %s", path)
+		case <-tick.C:
+		}
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\\"'\\\"'") + "'"
+}
+
+func TestStateTransitionsWithFakeOutput(t *testing.T) {
+	p, device := newTestPlayer(t, testFFmpeg(t, "printf samples"))
+	if err := p.Play("track"); err != nil {
+		t.Fatal(err)
+	}
+	out := device.lastOutput(t)
+	if !p.Active() || !p.Playing() || p.Paused() {
+		t.Fatal("Play did not start an active, playing session")
+	}
+	p.Pause()
+	if p.Playing() || !p.Paused() {
+		t.Fatal("Pause did not hold the session")
+	}
+	p.Resume()
+	p.Toggle()
+	if !p.Paused() {
+		t.Fatal("Toggle did not pause the session")
+	}
+	p.Toggle()
+	if !p.Playing() || p.Paused() {
+		t.Fatal("Toggle did not resume the session")
+	}
+	out.drain(t)
+	waitClosed(t, sessionOf(t, p).done)
+	if !p.Ended() {
+		t.Fatal("a drained, clean stream was not ended")
+	}
+}
+
+func TestSeekPreservesPauseAndPosition(t *testing.T) {
+	args := filepath.Join(t.TempDir(), "args")
+	body := "printf '%s\\n' \"$@\" > " + shellQuote(args) + "\nprintf samples\nexec sleep 60"
+	p, device := newTestPlayer(t, testFFmpeg(t, body))
+	if err := p.Play("track"); err != nil {
+		t.Fatal(err)
+	}
+	first := sessionOf(t, p)
+	first.source.read.Store(3 * bytesPerSecond)
+	device.lastOutput(t).setBuffered(bytesPerSecond)
+	if got, want := p.Position(), 2*time.Second; got != want {
+		t.Errorf("Position = %v, want %v", got, want)
+	}
+	p.Pause()
+	_ = waitForFile(t, args)
+	if err := os.Remove(args); err != nil {
+		t.Fatal(err)
+	}
+	p.Seek(2500 * time.Millisecond)
+	second := sessionOf(t, p)
+	if second == first || !p.Paused() {
+		t.Fatal("Seek did not replace and preserve the paused session")
+	}
+	waitClosed(t, first.done)
+	second.source.read.Store(3 * bytesPerSecond)
+	device.lastOutput(t).setBuffered(bytesPerSecond / 2)
+	if got, want := p.Position(), 5*time.Second; got != want {
+		t.Errorf("Position after seek = %v, want %v", got, want)
+	}
+	got := strings.Fields(string(waitForFile(t, args)))
+	ss, input := -1, -1
+	for i, arg := range got {
+		if arg == "-ss" {
+			ss = i
+		}
+		if arg == "-i" {
+			input = i
+		}
+	}
+	if ss < 0 || input < 0 || ss > input || got[ss+1] != "2.500" {
+		t.Errorf("ffmpeg arguments = %q, want -ss 2.500 before -i", got)
+	}
+}
+
+func TestFailureAndReplacementReapFakeFFmpeg(t *testing.T) {
+	t.Run("failure", func(t *testing.T) {
+		p, device := newTestPlayer(t, testFFmpeg(t, "echo unavailable >&2\nexit 17"))
+		if err := p.Play("track"); err != nil {
+			t.Fatal(err)
+		}
+		device.lastOutput(t).drain(t)
+		if got := waitForFailure(t, p); !strings.Contains(got, "unavailable") {
+			t.Errorf("Failure = %q, want ffmpeg stderr", got)
+		}
+		if sessionOf(t, p).waitErr == nil {
+			t.Error("an ffmpeg exit status was not recorded")
+		}
+	})
+	t.Run("replacement", func(t *testing.T) {
+		p, _ := newTestPlayer(t, testFFmpeg(t, "printf samples\nexec sleep 60"))
+		if err := p.Play("first"); err != nil {
+			t.Fatal(err)
+		}
+		first := sessionOf(t, p)
+		if err := p.Play("second"); err != nil {
+			t.Fatal(err)
+		}
+		waitClosed(t, first.done)
+		if first.cmd.ProcessState == nil {
+			t.Fatal("replaced ffmpeg process was not reaped")
+		}
+	})
+}
+
+func TestMissingFFmpegIsReported(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	p, _ := newTestPlayer(t, "")
+	if err := p.Play("track"); !errors.Is(err, ErrNoFFmpeg) {
+		t.Fatalf("Play error = %v, want ErrNoFFmpeg", err)
+	}
+}
+
+func TestParallelStateAccess(t *testing.T) {
+	p, _ := newTestPlayer(t, testFFmpeg(t, "printf samples\nexec sleep 60"))
+	if err := p.Play("track"); err != nil {
+		t.Fatal(err)
+	}
+	var group sync.WaitGroup
+	for _, action := range []func(){
+		func() { p.Pause(); p.Resume(); p.Toggle() },
+		func() { _ = p.Position(); _ = p.Playing(); _ = p.Ended(); _ = p.Failure() },
+		p.Stop,
+	} {
+		group.Go(func() {
+			for range 100 {
+				action()
+			}
+		})
+	}
+	group.Wait()
+}
 
 func TestPlayersShareOneContext(t *testing.T) {
 	opened := 0
-	shared := &sharedAudio{open: func() (device, error) { opened++; return fakeDevice{}, nil }}
+	shared := &sharedAudio{open: func() (device, error) { opened++; return &fakeDevice{}, nil }}
 	a, b := &Player{audio: shared}, &Player{audio: shared}
 	if _, err := a.audio.context(); err != nil {
 		t.Fatal(err)
@@ -337,11 +558,11 @@ func TestOutputErrorBecomesFailure(t *testing.T) {
 	out := &fakeOutput{playing: true}
 	source := newCountingReader(strings.NewReader(""))
 	s := &session{source: source, stderr: &boundedBuffer{limit: 16}, done: make(chan struct{}), out: out}
-	p := &Player{session: s, audio: &sharedAudio{open: func() (device, error) { return fakeDevice{}, nil }}}
+	p := &Player{session: s, audio: &sharedAudio{open: func() (device, error) { return &fakeDevice{}, nil }}}
 	if got := p.Failure(); got != "" {
 		t.Fatalf("unexpected failure %q", got)
 	}
-	out.err = errors.New("device lost")
+	out.setError(errors.New("device lost"))
 	if got := p.Failure(); !strings.Contains(got, "device lost") {
 		t.Errorf("failure = %q, want the output error", got)
 	}
@@ -349,9 +570,61 @@ func TestOutputErrorBecomesFailure(t *testing.T) {
 		t.Error("a player whose output failed must not report playing")
 	}
 
-	out.err = nil
-	p.audio = &sharedAudio{open: func() (device, error) { return fakeDevice{err: errors.New("ctx dead")}, nil }}
+	out.setError(nil)
+	p.audio = &sharedAudio{open: func() (device, error) { return &fakeDevice{err: errors.New("ctx dead")}, nil }}
 	if got := p.Failure(); !strings.Contains(got, "ctx dead") {
 		t.Errorf("failure = %q, want the context error", got)
 	}
+}
+
+// A stream that fails mid-track is told apart from a track that ended and from
+// the sound going away: the app moves the queue on for the first, and leaves it
+// alone for the others.
+func TestStreamFailedTellsAReadFailureFromACleanEnd(t *testing.T) {
+	failing := filepath.Join(t.TempDir(), "ffmpeg-fails")
+	body := "#!/bin/sh\nhead -c 65536 /dev/zero\necho 'IO error: Connection reset by peer' >&2\nexit 1\n"
+	if err := os.WriteFile(failing, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := New(WithFFmpeg(failing), WithSilentAudio())
+	t.Cleanup(p.Stop)
+	if err := p.Play("http://example.invalid/reset"); err != nil {
+		t.Fatal(err)
+	}
+	waitForStop(t, p)
+	if !p.StreamFailed() {
+		t.Errorf("a failed read was not reported as a stream failure: %q", p.Failure())
+	}
+
+	clean := filepath.Join(t.TempDir(), "ffmpeg-clean")
+	body = "#!/bin/sh\nhead -c 65536 /dev/zero\nexit 0\n"
+	if err := os.WriteFile(clean, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p = New(WithFFmpeg(clean), WithSilentAudio())
+	t.Cleanup(p.Stop)
+	if err := p.Play("http://example.invalid/clean"); err != nil {
+		t.Fatal(err)
+	}
+	waitForStop(t, p)
+	if p.Failure() != "" {
+		t.Errorf("a clean end was reported as a failure: %q", p.Failure())
+	}
+	if p.StreamFailed() {
+		t.Error("a clean end was reported as a stream failure")
+	}
+}
+
+// waitForStop waits until the decode has stopped, and says so when it does
+// not.
+func waitForStop(t *testing.T, p *Player) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if p.Ended() || p.Failure() != "" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the decode never stopped: playing=%v failure=%q", p.Playing(), p.Failure())
 }

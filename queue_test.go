@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,6 +78,18 @@ func TestSystemMediaCommandsUpdatePlaybackState(t *testing.T) {
 	controls.SetRepeat("Playlist")
 	if a.volume != 35 || a.player.Volume() != 0.35 || !media.state.Shuffle || media.state.Volume != 0.35 || a.repeat != repeatQueue || media.state.LoopStatus != "Playlist" {
 		t.Errorf("media volume/shuffle/repeat did not reach the app and system state: app volume=%v player volume=%v repeat=%v state=%+v", a.volume, a.player.Volume(), a.repeat, media.state)
+	}
+	controls.Seek(100 * time.Millisecond)
+	if media.state.SeekVersion != 1 {
+		t.Errorf("explicit seek version = %d, want 1", media.state.SeekVersion)
+	}
+	a.syncSystemMedia()
+	if media.state.SeekVersion != 1 {
+		t.Error("ordinary state publication was reported as a seek")
+	}
+	a.previous()
+	if media.state.SeekVersion != 2 {
+		t.Errorf("restart seek version = %d, want 2", media.state.SeekVersion)
 	}
 	a.resolving = true
 	controls.Stop()
@@ -242,11 +255,18 @@ func TestShuffleAndRepeatChooseTheNextTrack(t *testing.T) {
 	if i, ok := a.nextIndex(); !ok || i != 0 {
 		t.Errorf("repeating the queue went to %d, %v", i, ok)
 	}
-	a.shuffle = true
-	for range 50 {
-		if i, ok := a.nextIndex(); !ok || i == a.index {
-			t.Fatalf("shuffle chose %d, %v for the current track", i, ok)
-		}
+	a.repeat, a.index = repeatOff, 0
+	a.setShuffle(true)
+	if i, ok := a.nextIndex(); !ok || i != 1 {
+		t.Errorf("a shuffled queue went to %d, %v instead of the track after it", i, ok)
+	}
+	a.index = 2
+	if _, ok := a.nextIndex(); ok {
+		t.Errorf("a shuffled queue did not end at its last track")
+	}
+	a.repeat = repeatQueue
+	if i, ok := a.nextIndex(); !ok || i != 0 {
+		t.Errorf("repeating a shuffled queue went to %d, %v", i, ok)
 	}
 }
 
@@ -381,6 +401,34 @@ func TestQueueEndWaitsForInFlightRecommendation(t *testing.T) {
 	}
 }
 
+// The end of the queue asks YouTube for more even when the recommendations
+// pulled before it have been played out. It used to stop there, leaving
+// shuffle and auto-play with nothing to play after the queue.
+func TestTheQueueEndAsksAgainWhenItsRecommendationsArePlayedOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"contents":{"playlistPanelRenderer":{"contents":[{"playlistPanelVideoRenderer":{"videoId":"radio-1","title":{"simpleText":"Radio one"}}}]}}}`))
+	}))
+	defer server.Close()
+	client := youtube.NewClient(youtube.Options{BaseURL: server.URL, APIKey: "test"})
+	a := newTestApp()
+	a.public, a.authed = client, client
+	a.settings.AutoPlay = true
+	current := youtube.MusicItem{VideoID: "seed", Title: "Seed"}
+	a.current, a.queue = current, []youtube.MusicItem{current}
+	a.index = 0
+	a.resetUpNext(youtube.UpNextOptions{VideoID: current.VideoID}, "")
+	// What is left once the recommendations pulled earlier have been played.
+	a.upNextFetched, a.upNextToken = true, ""
+
+	a.advance()
+	if len(a.queue) != 2 || a.queue[1].VideoID != "radio-1" {
+		t.Fatalf("the queue end pulled %#v, want the recommendation after it", a.queue)
+	}
+	if a.index != 1 || a.current.VideoID != "radio-1" {
+		t.Errorf("the queue end left current=%q at index %d", a.current.VideoID, a.index)
+	}
+}
+
 func TestUpNextFailureKeepsTheSelectedQueue(t *testing.T) {
 	client := youtube.NewClient(youtube.Options{
 		APIKey:     "test",
@@ -398,24 +446,45 @@ func TestUpNextFailureKeepsTheSelectedQueue(t *testing.T) {
 	}
 }
 
-func TestShuffleOfTwoTracksAlwaysPicksTheOther(t *testing.T) {
+// Shuffle arranges what is still to play, once: the queue then moves from each
+// track to the next and ends, which is where auto-play takes over. Drawing a
+// track at random as it played never reached the end.
+func TestShuffleArrangesTheQueueOnceAndThenPlaysItInOrder(t *testing.T) {
 	a := newTestApp()
-	a.shuffle = true
-	a.queue = []youtube.MusicItem{{VideoID: "a"}, {VideoID: "b"}}
-	for _, index := range []int{0, 1} {
-		a.index = index
-		for range 50 {
-			if i, ok := a.nextIndex(); !ok || i != 1-index {
-				t.Fatalf("from %d, shuffle chose %d, %v", index, i, ok)
-			}
-		}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+		a.queue = append(a.queue, youtube.MusicItem{VideoID: id})
 	}
-	// A stale index past the end still yields a track in the queue.
-	a.index = 7
-	for range 50 {
-		if i, ok := a.nextIndex(); !ok || i < 0 || i >= len(a.queue) {
-			t.Fatalf("from a stale index, shuffle chose %d, %v", i, ok)
+	a.current, a.index = a.queue[0], 0
+	original := make([]string, 0, len(a.queue))
+	for _, item := range a.queue {
+		original = append(original, item.VideoID)
+	}
+	a.setShuffle(true)
+
+	var played []string
+	for {
+		next, ok := a.nextIndex()
+		if !ok {
+			break
 		}
+		if next != a.index+1 {
+			t.Fatalf("the shuffled queue moved from %d to %d", a.index, next)
+		}
+		a.index = next
+		played = append(played, a.queue[next].VideoID)
+	}
+	if len(played) != len(a.queue)-1 {
+		t.Fatalf("shuffle played %d tracks, want the %d still to play", len(played), len(a.queue)-1)
+	}
+	seen := map[string]bool{}
+	for _, id := range played {
+		if seen[id] {
+			t.Errorf("shuffle played %q twice", id)
+		}
+		seen[id] = true
+	}
+	if slices.Equal(played, original[1:]) {
+		t.Errorf("shuffle left the queue in the order it was given: %v", played)
 	}
 }
 
@@ -428,5 +497,33 @@ func TestRepeatCyclesThroughItsModes(t *testing.T) {
 	}
 	if want := []repeatMode{repeatQueue, repeatTrack, repeatOff, repeatQueue}; !slices.Equal(seen, want) {
 		t.Errorf("repeat went %v, want %v", seen, want)
+	}
+}
+
+// Shuffle plays the page from a track drawn at random, with the whole page in
+// the queue behind it, arranged in an order of its own.
+func TestShufflePlaysThePageFromARandomTrack(t *testing.T) {
+	a := newTestApp()
+	for _, id := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		a.playable = append(a.playable, youtube.MusicItem{VideoID: id})
+	}
+	opened, orders := map[string]bool{}, map[string]bool{}
+	for range 200 {
+		a.shufflePage()
+		if len(a.queue) < len(a.playable) {
+			t.Fatalf("the queue holds %d of the page's %d tracks", len(a.queue), len(a.playable))
+		}
+		held := make([]string, 0, len(a.playable))
+		for _, item := range a.queue[:len(a.playable)] {
+			held = append(held, item.VideoID)
+		}
+		orders[strings.Join(held, ",")] = true
+		opened[a.queue[a.index].VideoID] = true
+	}
+	if len(opened) < 2 {
+		t.Errorf("shuffle always opened on %v", opened)
+	}
+	if len(orders) < 2 {
+		t.Errorf("shuffle left the page in one order: %v", orders)
 	}
 }

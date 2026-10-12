@@ -72,6 +72,13 @@ func WithFFmpeg(path string) Option {
 	return func(p *Player) { p.ffmpegPath = path }
 }
 
+// withAudio supplies the audio context used by a Player. It is kept internal
+// so tests can replace the operating-system output without exposing it as an
+// application configuration surface.
+func withAudio(audio *sharedAudio) Option {
+	return func(p *Player) { p.audio = audio }
+}
+
 // New creates a player that is not yet playing anything. It does not touch
 // the audio device or the file system.
 func New(options ...Option) *Player {
@@ -280,6 +287,28 @@ func (p *Player) Failure() string {
 		message = "ffmpeg stopped"
 	}
 	return message
+}
+
+// StreamFailed reports whether the last decode stopped because the stream
+// could not be read, as a connection YouTube's server reset, rather than
+// because the audio device stopped working or the stream ended.
+func (p *Player) StreamFailed() bool {
+	p.mu.Lock()
+	s := p.session
+	stopped := s != nil && s.stopped
+	p.mu.Unlock()
+	if s == nil || stopped {
+		return false
+	}
+	if err := p.audioFailure(s); err != nil {
+		return false // the sound, not the stream, is what stopped
+	}
+	select {
+	case <-s.done:
+	default:
+		return false // the decode is still running
+	}
+	return strings.TrimSpace(s.stderr.String()) != ""
 }
 
 // endOfStream says whether a stream has been played to its end. A paused
@@ -560,15 +589,22 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // boundedBuffer keeps the first limit bytes written to it, which is enough
 // of ffmpeg's error output to explain a failed decode.
 type boundedBuffer struct {
+	mu    sync.Mutex
 	buf   []byte
 	limit int
 }
 
 func (b *boundedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if room := b.limit - len(b.buf); room > 0 {
 		b.buf = append(b.buf, p[:min(room, len(p))]...)
 	}
 	return len(p), nil
 }
 
-func (b *boundedBuffer) String() string { return string(b.buf) }
+func (b *boundedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}

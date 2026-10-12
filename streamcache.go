@@ -47,30 +47,44 @@ func newStreamCache(resolve streamResolver) *streamCache {
 // get returns the audio URL for videoID, resolving it unless a fresh result
 // or an in-flight resolve for the same session exists. A failed resolve is
 // not remembered.
-func (c *streamCache) get(videoID, cookie string) (string, time.Duration, error) {
+func (c *streamCache) get(ctx context.Context, videoID, cookie string) (string, time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return "", 0, err
+	}
 	c.mu.Lock()
 	if e, ok := c.entries[videoID]; ok && e.cookie == cookie && !c.staleLocked(e) {
 		c.mu.Unlock()
-		<-e.done
-		return e.url, e.total, e.err
+		select {
+		case <-e.done:
+			return e.url, e.total, e.err
+		case <-ctx.Done():
+			return "", 0, ctx.Err()
+		}
 	}
 	e := &streamEntry{cookie: cookie, at: c.now(), done: make(chan struct{})}
 	c.entries[videoID] = e
 	c.trimLocked()
 	c.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
-	e.url, e.total, e.err = c.resolve(ctx, videoID, cookie)
-	cancel()
-	if e.err != nil {
-		c.mu.Lock()
-		if c.entries[videoID] == e {
-			delete(c.entries, videoID)
+	go func() {
+		resolveCtx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+		defer cancel()
+		e.url, e.total, e.err = c.resolve(resolveCtx, videoID, cookie)
+		close(e.done)
+		if e.err != nil {
+			c.mu.Lock()
+			if c.entries[videoID] == e {
+				delete(c.entries, videoID)
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
+	}()
+	select {
+	case <-e.done:
+		return e.url, e.total, e.err
+	case <-ctx.Done():
+		return "", 0, ctx.Err()
 	}
-	close(e.done)
-	return e.url, e.total, e.err
 }
 
 // staleLocked reports whether a finished entry is past its lifetime.

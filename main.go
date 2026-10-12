@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"log"
-	"math/rand/v2"
 	"path/filepath"
 	"runtime/debug"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/updater/native"
 	"github.com/egoist/mygo/ui"
 
 	"github.com/elianiva/meiro/m3"
@@ -34,6 +34,7 @@ type app struct {
 	router             *ui.Router
 	player             *player.Player
 	systemMedia        systemmedia.Session
+	seekVersion        uint64
 	thumbs             *thumbCache
 	audioCache         *audioCache
 	retiredAudioCaches []*audioCache
@@ -69,6 +70,8 @@ type app struct {
 	accounts []youtube.AccountChannel
 	signedIn bool
 	signIn   signInState
+	// newPlaylist is the dialog that names a playlist to make.
+	newPlaylist newPlaylistState
 	// signInAttempt invalidates work when a sign-in dialog is dismissed.
 	signInAttempt atomic.Uint64
 	// credentialMu serializes restore, save and delete operations so a late
@@ -188,8 +191,9 @@ type app struct {
 	// resolving is set from the moment a track is chosen until its audio URL
 	// is found, and streamGen numbers those requests, so that only the latest
 	// one plays when it lands.
-	resolving bool
-	streamGen int
+	resolving  bool
+	streamGen  int
+	streamStop context.CancelFunc
 	// streams remembers resolved audio URLs, including those of tracks
 	// resolved ahead of their turn.
 	streams *streamCache
@@ -201,6 +205,17 @@ type app struct {
 	// opening is the album or playlist whose first song is being looked up
 	// to play, so that a second press does not look it up again.
 	opening string
+
+	// Desktop integrations. awakeRelease drops the sleep assertion; tray is
+	// the menu-bar icon while it shows; suspendedWhilePlaying remembers a
+	// pause the system sleep caused, to undo on wake.
+	awakeRelease          func()
+	tray                  *mygo.Tray
+	suspendedWhilePlaying bool
+	historyPath           string
+	history               []historyEntry
+	historyLoaded         bool
+	statsRange            int // days the stats page covers: 7, 14 or 30
 
 	// job numbers page loads, so a slow one for a page the user has left
 	// is dropped when it lands.
@@ -270,6 +285,14 @@ func main() {
 	// megabytes.
 	debug.SetGCPercent(50)
 	sweepTempRoot()
+	// A second launch hands its work to the running app instead of starting
+	// another player with its own audio.
+	if !mygo.App.RequestSingleInstanceLock() {
+		return
+	}
+	// Signed auto-updates with the updater's native window: in builds made
+	// without update signing it stays idle and says so when asked.
+	mygo.Use(native.Plugin)
 	a := newApp()
 	mygo.App.WhenReady(func() {
 		a.setup()
@@ -290,6 +313,7 @@ func main() {
 			a.systemMedia = session
 			a.syncSystemMedia()
 		}
+		a.setupDesktop()
 		// Background work reaches the window through a.win, so it starts only
 		// once the window is there.
 		a.restoreAccount()
@@ -306,8 +330,19 @@ func main() {
 }
 
 // shutdown flushes settings before closing resources that belong to the app.
+// The desktop integrations only run with a window: tests shut the app down
+// without ever starting one, where asking the system anything would wait for
+// an event loop that does not run.
 func (a *app) shutdown() {
 	a.saver.wait()
+	if a.win != nil {
+		a.releaseAwake()
+		mygo.GlobalShortcut.UnregisterAll()
+		if a.tray != nil {
+			a.tray.Destroy()
+			a.tray = nil
+		}
+	}
 	if a.systemMedia != nil {
 		if closeErr := a.systemMedia.Close(); closeErr != nil {
 			log.Printf("close system media controls: %v", closeErr)
@@ -531,22 +566,17 @@ func (a *app) systemMediaControls() systemmedia.Controls {
 			a.update(func() { a.previous() })
 		},
 		Seek: func(position time.Duration) {
-			a.update(func() {
-				a.player.Seek(position)
-				a.syncSystemMedia()
-			})
+			a.update(func() { a.seek(position) })
 		},
 		SetVolume: func(volume float64) {
 			a.update(func() {
 				a.setVolume(volume * 100)
 				a.saveSettings()
-				a.syncSystemMedia()
 			})
 		},
 		SetShuffle: func(shuffle bool) {
 			a.update(func() {
-				a.shuffle = shuffle
-				a.syncSystemMedia()
+				a.setShuffle(shuffle)
 			})
 		},
 		SetRepeat: func(status string) {
@@ -566,8 +596,12 @@ func (a *app) systemMediaControls() systemmedia.Controls {
 }
 
 // syncSystemMedia publishes a snapshot of app-owned playback state. The
-// platform adapters throttle position updates to avoid flooding the OS.
+// platform adapters throttle position updates to avoid flooding the OS. It
+// also lines up the sleep assertion and the tray with the player's state,
+// so every path that changes playback keeps them right through this one.
 func (a *app) syncSystemMedia() {
+	a.syncAwake()
+	a.syncTrayMedia()
 	if a.systemMedia == nil {
 		return
 	}
@@ -602,6 +636,7 @@ func (a *app) syncSystemMedia() {
 		ArtworkURL:  a.current.Thumbnail,
 		Duration:    a.total,
 		Position:    position,
+		SeekVersion: a.seekVersion,
 		Status:      status,
 		LoopStatus:  loopStatus,
 		Volume:      a.volume / 100,
@@ -709,6 +744,13 @@ func (a *app) poll() {
 			a.playErr = failure
 			a.syncSystemMedia()
 		}
+		// ffmpeg gave up on the stream. The queue keeps its place: the track
+		// after this one plays, and the failure stays on the player until it
+		// does. A stream that stops because the sound did is not the queue's
+		// business, so it is left where it is.
+		if a.player.StreamFailed() {
+			a.advance()
+		}
 		return
 	}
 	if a.player.Ended() {
@@ -754,14 +796,6 @@ func (a *app) nextIndex() (int, bool) {
 	switch {
 	case limit == 0 || (!a.settings.AutoPlay && a.recommendationStart >= 0 && a.index >= limit):
 		return 0, false
-	case a.shuffle && limit > 1:
-		// Any track but the current one: draw from the others, and step over
-		// the current one's place.
-		i := rand.IntN(limit - 1)
-		if i >= a.index && a.index >= 0 {
-			i++
-		}
-		return i, true
 	case a.index+1 < limit:
 		return a.index + 1, true
 	case a.repeat == repeatQueue:

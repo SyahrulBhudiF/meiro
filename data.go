@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math/rand/v2"
 	"net/url"
 	"strconv"
 	"strings"
@@ -61,6 +62,8 @@ type searchState struct {
 	query     string
 	submitted string
 	kind      int
+	// seq numbers the search in flight, so a slow earlier one is dropped.
+	seq int
 	// suggestions are the completions of the text being typed. suggestSeq
 	// numbers the request that asked for them, so a slow answer to an earlier
 	// query is dropped, and suggestCancel stops a pending request.
@@ -262,6 +265,18 @@ func (a *app) fetch(load func(ctx context.Context, client *youtube.Client) (*you
 				a.feed.err = err.Error()
 				return
 			}
+			// A page over its own content takes the name and the picture from
+			// what it loaded; what the caller seeded is only what it had at
+			// hand when the page was opened.
+			if a.detail.kind != "" {
+				if result.Title != "" {
+					a.detail.title = result.Title
+				}
+				if result.Thumbnail != "" {
+					a.detail.art = result.Thumbnail
+				}
+				a.details[a.router.Path()] = a.detail
+			}
 			a.feed.sections = result.Sections
 			// Items are the page's songs, cards and rows all together, which
 			// its sections already hold; they are only a page by themselves
@@ -299,7 +314,7 @@ func (a *app) runSearch(query string) {
 	query = strings.TrimSpace(query)
 	a.cancelSuggestions()
 	if query == "" {
-		a.search = searchState{kind: a.search.kind}
+		a.search = searchState{kind: a.search.kind, seq: a.search.seq + 1}
 		a.rowsDirty = true
 		return
 	}
@@ -315,13 +330,17 @@ func (a *app) runSearch(query string) {
 	a.search.items = nil
 	a.rowsDirty = true
 	a.list.ScrollTo(0, ui.Start)
-	job := a.nextJob()
-	ctx := a.jobContext()
+	// Bump the page job so a "show more" in flight cannot append here.
+	a.nextJob()
+	a.search.seq++
+	seq := a.search.seq
 	kind := searchKinds[a.search.kind].kind
 	a.run(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
 		result, err := client.Search(ctx, query, youtube.SearchOptions{Type: kind})
 		a.update(func() {
-			if job != a.job {
+			if seq != a.search.seq {
 				return
 			}
 			a.rowsDirty = true
@@ -479,6 +498,8 @@ func (a *app) setRows() {
 		sections = []youtube.MusicSection{{Items: s.items}}
 	}
 	vertical := onDetail && a.detail.kind != pageArtist || path == "/search"
+	// placed says whether the library has led with its tile yet.
+	placed := false
 	for index, section := range sections {
 		if len(section.Items) == 0 {
 			continue
@@ -518,10 +539,17 @@ func (a *app) setRows() {
 			if songs*10 >= len(section.Items)*6 && len(section.Items) >= 3 && section.Items[0].Duration != "" {
 				kind = rowColumns
 			}
+			items := section.Items
 			if path == "/library" && kind == rowCards {
 				kind = rowGrid
 			}
-			a.rows = append(a.rows, row{kind: kind, shelf: shelf, items: section.Items, queue: queue, track: -1})
+			// The library leads with making a playlist, before the Liked
+			// Music that the rest of it usually starts with.
+			if path == "/library" && !placed && (kind == rowGrid || kind == rowCards) {
+				items = append([]youtube.MusicItem{newPlaylistItem}, items...)
+				placed = true
+			}
+			a.rows = append(a.rows, row{kind: kind, shelf: shelf, items: items, queue: queue, track: -1})
 		}
 	}
 	if s.more != "" {
@@ -590,9 +618,13 @@ func (a *app) playbackQueueOptions(index int) (youtube.UpNextOptions, string) {
 	return options, source
 }
 
-// playCollection plays an album or a playlist from its first song, without
-// opening its page, as the play button over its card does.
-func (a *app) playCollection(item youtube.MusicItem, list string, position int) {
+// playCollection plays an album or a playlist without opening its page, as the
+// play button over its card does. With shuffle, a song is drawn to open on and
+// the rest are arranged behind it.
+func (a *app) playCollection(item youtube.MusicItem, list string, position int, shuffle bool) {
+	if shuffle {
+		a.shuffle = true
+	}
 	kind, id := targetOf(item)
 	if kind == pageTrack {
 		a.play(item, []youtube.MusicItem{item}, 0)
@@ -639,14 +671,24 @@ func (a *app) playCollection(item youtube.MusicItem, list string, position int) 
 			if a.opening == key {
 				a.opening = ""
 			}
-			if len(songs) > 0 {
-				options := youtube.UpNextOptions{}
-				if kind == pagePlaylist {
-					playlistIndex := 0
-					options.PlaylistID, options.PlaylistIndex = id, &playlistIndex
-				}
-				a.playWithOptions(songs[0], songs, 0, options, item.Title)
+			if len(songs) == 0 {
+				return
 			}
+			// What the playlist is read from follows the song drawn to open
+			// it, so the queue YouTube is asked for keeps the same place.
+			start := 0
+			if shuffle && len(songs) > 1 {
+				start = rand.IntN(len(songs))
+				rest := append(append([]youtube.MusicItem{}, songs[:start]...), songs[start+1:]...)
+				rand.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
+				songs = append([]youtube.MusicItem{songs[start]}, rest...)
+			}
+			options := youtube.UpNextOptions{}
+			if kind == pagePlaylist {
+				playlistIndex := start
+				options.PlaylistID, options.PlaylistIndex = id, &playlistIndex
+			}
+			a.playWithOptions(songs[0], songs, 0, options, item.Title)
 		})
 	})
 }

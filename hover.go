@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"time"
 
 	"github.com/elianiva/meiro/youtube"
@@ -52,7 +53,9 @@ func (a *app) resolveHovered(key, videoID string) {
 	a.hoverBusy = true
 	cookie := a.ytDlpCookie
 	a.run(func() {
-		_, _, _ = a.streams.get(videoID, cookie)
+		ctx, cancel := context.WithTimeout(context.Background(), streamResolveTimeout)
+		defer cancel()
+		_, _, _ = a.streams.get(ctx, videoID, cookie)
 		a.update(func() { a.hoverBusy = false })
 	})
 }

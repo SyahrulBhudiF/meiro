@@ -11,11 +11,14 @@ import (
 	"github.com/elianiva/meiro/youtube"
 )
 
-// searches counts the search requests the fake YouTube has answered, and
-// fakePageID records the channel a request acted as.
+// searches counts the search requests the fake YouTube has answered,
+// fakePageID records the channel a request acted as, and the playlist counters
+// count the library landings served and the playlists made.
 var (
-	searches   atomic.Int32
-	fakePageID atomic.Value
+	searches        atomic.Int32
+	fakePageID      atomic.Value
+	libraryLoads    atomic.Int32
+	playlistCreates atomic.Int32
 )
 
 // fakeMusic answers the InnerTube endpoints with canned responses, so the
@@ -45,6 +48,14 @@ func (fakeMusic) RoundTrip(request *http.Request) (*http.Response, error) {
 		reply = playlistResponse
 	case strings.Contains(asked, "MPREb_test"):
 		reply = albumResponse
+	case strings.Contains(asked, "FEmusic_library_landing"):
+		libraryLoads.Add(1)
+		reply = homeResponse
+	case strings.HasSuffix(request.URL.Path, "/playlist/create"):
+		playlistCreates.Add(1)
+		reply = createPlaylistResponse
+	case strings.Contains(asked, "UCartist"):
+		reply = artistResponse
 	case strings.Contains(asked, `"query"`):
 		searches.Add(1)
 		reply = searchResponse
@@ -128,6 +139,20 @@ const playlistResponse = `{"contents":{"playlistVideoListRenderer":{"contents":[
 	{"playlistVideoRenderer":{"videoId":"playlist-video","title":{"simpleText":"Playlist video"},"lengthText":{"simpleText":"5:21"}}}
 ]}}}`
 
+// artistResponse carries the heading an artist page puts over its content.
+const artistResponse = `{"header":{"musicImmersiveHeaderRenderer":{
+	"title":{"runs":[{"text":"Aurora Vale"}]},
+	"thumbnail":{"musicThumbnailRenderer":{"thumbnail":{"thumbnails":[{"url":"https://img.example/aurora"}]}}}}},
+	"contents":{"musicShelfRenderer":{"contents":[
+	{"musicResponsiveListItemRenderer":{
+		"playlistItemData":{"videoId":"vid-9"},
+		"flexColumns":[
+			{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Artist Track"}]}}},
+			{"musicResponsiveListItemFlexColumnRenderer":{"text":{"runs":[{"text":"Aurora Vale"},{"text":" • "},{"text":"3:00"}]}}}
+		]
+	}}
+]}}}`
+
 const searchResponse = `{"contents":{"musicShelfRenderer":{"contents":[
 	{"musicResponsiveListItemRenderer":{
 		"playlistItemData":{"videoId":"vid-4"},
@@ -198,6 +223,9 @@ const signedInAccountMenu = `{"actions":[{"openPopupAction":{"popup":{"multiPage
 // signedOutAccountMenu is what a session YouTube has forgotten is answered
 // with: a page with no account in it.
 const signedOutAccountMenu = `{"contents":{}}`
+
+// createPlaylistResponse is what YouTube answers a playlist it made with.
+const createPlaylistResponse = `{"playlistId":"PLnew"}`
 
 // memoryStore is a cookie store held in memory.
 type memoryStore struct {
