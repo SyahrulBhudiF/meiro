@@ -34,6 +34,7 @@ type app struct {
 	router             *ui.Router
 	player             *player.Player
 	systemMedia        systemmedia.Session
+	seekVersion        uint64
 	thumbs             *thumbCache
 	audioCache         *audioCache
 	retiredAudioCaches []*audioCache
@@ -531,16 +532,12 @@ func (a *app) systemMediaControls() systemmedia.Controls {
 			a.update(func() { a.previous() })
 		},
 		Seek: func(position time.Duration) {
-			a.update(func() {
-				a.player.Seek(position)
-				a.syncSystemMedia()
-			})
+			a.update(func() { a.seek(position) })
 		},
 		SetVolume: func(volume float64) {
 			a.update(func() {
 				a.setVolume(volume * 100)
 				a.saveSettings()
-				a.syncSystemMedia()
 			})
 		},
 		SetShuffle: func(shuffle bool) {
@@ -602,6 +599,7 @@ func (a *app) syncSystemMedia() {
 		ArtworkURL:  a.current.Thumbnail,
 		Duration:    a.total,
 		Position:    position,
+		SeekVersion: a.seekVersion,
 		Status:      status,
 		LoopStatus:  loopStatus,
 		Volume:      a.volume / 100,

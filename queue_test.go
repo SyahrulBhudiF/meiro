@@ -78,6 +78,18 @@ func TestSystemMediaCommandsUpdatePlaybackState(t *testing.T) {
 	if a.volume != 35 || a.player.Volume() != 0.35 || !media.state.Shuffle || media.state.Volume != 0.35 || a.repeat != repeatQueue || media.state.LoopStatus != "Playlist" {
 		t.Errorf("media volume/shuffle/repeat did not reach the app and system state: app volume=%v player volume=%v repeat=%v state=%+v", a.volume, a.player.Volume(), a.repeat, media.state)
 	}
+	controls.Seek(100 * time.Millisecond)
+	if media.state.SeekVersion != 1 {
+		t.Errorf("explicit seek version = %d, want 1", media.state.SeekVersion)
+	}
+	a.syncSystemMedia()
+	if media.state.SeekVersion != 1 {
+		t.Error("ordinary state publication was reported as a seek")
+	}
+	a.previous()
+	if media.state.SeekVersion != 2 {
+		t.Errorf("restart seek version = %d, want 2", media.state.SeekVersion)
+	}
 	a.resolving = true
 	controls.Stop()
 	if a.resolving || media.state.Status != systemmedia.Stopped {

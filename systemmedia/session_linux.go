@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"sync"
@@ -21,17 +22,20 @@ const (
 	objectPath      = dbus.ObjectPath("/org/mpris/MediaPlayer2")
 	rootInterface   = "org.mpris.MediaPlayer2"
 	playerInterface = "org.mpris.MediaPlayer2.Player"
+	volumeInterval  = 50 * time.Millisecond
 )
 
 type linuxSession struct {
-	conn     *dbus.Conn
-	busName  string
-	props    *prop.Properties
-	mu       sync.Mutex
-	state    State
-	hasState bool
-	lastPos  time.Time
-	err      error
+	conn        *dbus.Conn
+	busName     string
+	props       *prop.Properties
+	mu          sync.Mutex
+	state       State
+	hasState    bool
+	lastPos     time.Time
+	volumeTimer *time.Timer
+	closed      bool
+	err         error
 }
 
 // New registers Meiro as an MPRIS player on the current user's D-Bus session.
@@ -94,6 +98,9 @@ func New(controls Controls) (Session, error) {
 				Name:       playerInterface,
 				Methods:    playerMethods,
 				Properties: properties.Introspection(playerInterface),
+				Signals: []introspect.Signal{{
+					Name: "Seeked", Args: []introspect.Arg{{Name: "Position", Type: "x"}},
+				}},
 			},
 		},
 	}
@@ -182,15 +189,18 @@ func (s *linuxSession) Update(state State) error {
 	if s.err != nil {
 		return s.err
 	}
+	if s.closed {
+		return errors.New("MPRIS session is closed")
+	}
 
 	statusChanged := !s.hasState || state.Status != s.state.Status
-	metadataChanged := !s.hasState || state.VideoID != s.state.VideoID || state.Title != s.state.Title || state.Artist != s.state.Artist || state.ArtworkURL != s.state.ArtworkURL || state.Duration != s.state.Duration
+	metadataChanged := !s.hasState || !state.sameMetadata(s.state)
 	if statusChanged {
 		if err := s.setProperty("PlaybackStatus", string(state.Status)); err != nil {
 			return s.fail(err)
 		}
 	}
-	if !s.hasState || state.LoopStatus != s.state.LoopStatus {
+	if (!s.hasState || state.LoopStatus != s.state.LoopStatus) && state.LoopStatus != s.props.GetMust(playerInterface, "LoopStatus") {
 		if err := s.setProperty("LoopStatus", state.LoopStatus); err != nil {
 			return s.fail(err)
 		}
@@ -200,35 +210,51 @@ func (s *linuxSession) Update(state State) error {
 			return s.fail(err)
 		}
 	}
-	if !s.hasState || state.Volume != s.state.Volume {
-		if err := s.setProperty("Volume", state.Volume); err != nil {
-			return s.fail(err)
+	if !s.hasState {
+		if state.Volume != s.props.GetMust(playerInterface, "Volume") {
+			if err := s.setProperty("Volume", state.Volume); err != nil {
+				return s.fail(err)
+			}
 		}
+	} else if state.Volume != s.state.Volume && s.volumeTimer == nil {
+		// Do not reset the timer during a drag: continuously changing volume
+		// must still reach the OS within one interval, including its final value.
+		s.volumeTimer = time.AfterFunc(volumeInterval, s.publishVolume)
 	}
-	if !s.hasState || state.Shuffle != s.state.Shuffle {
+	if (!s.hasState || state.Shuffle != s.state.Shuffle) && state.Shuffle != s.props.GetMust(playerInterface, "Shuffle") {
 		if err := s.setProperty("Shuffle", state.Shuffle); err != nil {
 			return s.fail(err)
 		}
 	}
-	for property, value := range map[string]bool{
-		"CanGoNext":     state.CanNext,
-		"CanGoPrevious": state.CanPrevious,
-		"CanPlay":       state.CanPlay,
-		"CanPause":      state.CanPause,
-		"CanSeek":       state.CanSeek,
+	for _, capability := range [...]struct {
+		property string
+		value    bool
+		previous bool
+	}{
+		{"CanGoNext", state.CanNext, s.state.CanNext},
+		{"CanGoPrevious", state.CanPrevious, s.state.CanPrevious},
+		{"CanPlay", state.CanPlay, s.state.CanPlay},
+		{"CanPause", state.CanPause, s.state.CanPause},
+		{"CanSeek", state.CanSeek, s.state.CanSeek},
 	} {
-		if !s.hasState || propertyValue(s.state, property) != value {
-			if err := s.setProperty(property, value); err != nil {
+		if !s.hasState || capability.previous != capability.value {
+			if err := s.setProperty(capability.property, capability.value); err != nil {
 				return s.fail(err)
 			}
 		}
 	}
+	seeked := s.hasState && state.SeekVersion != s.state.SeekVersion
 	positionChangedWhilePaused := state.Status != Playing && state.Position != s.state.Position
-	if !s.hasState || statusChanged || positionChangedWhilePaused || durationDistance(state.Position, s.state.Position) > 3*time.Second || time.Since(s.lastPos) >= time.Second {
+	if !s.hasState || statusChanged || seeked || positionChangedWhilePaused || durationDistance(state.Position, s.state.Position) > 3*time.Second || time.Since(s.lastPos) >= time.Second {
 		if err := s.setProperty("Position", int64(state.Position/time.Microsecond)); err != nil {
 			return s.fail(err)
 		}
 		s.lastPos = time.Now()
+	}
+	if seeked {
+		if err := s.conn.Emit(objectPath, playerInterface+".Seeked", int64(state.Position/time.Microsecond)); err != nil {
+			log.Printf("publish MPRIS seek: %v", err)
+		}
 	}
 	s.state = state
 	s.hasState = true
@@ -257,20 +283,14 @@ func (s *linuxSession) fail(err error) error {
 	return err
 }
 
-func propertyValue(state State, property string) bool {
-	switch property {
-	case "CanGoNext":
-		return state.CanNext
-	case "CanGoPrevious":
-		return state.CanPrevious
-	case "CanPlay":
-		return state.CanPlay
-	case "CanPause":
-		return state.CanPause
-	case "CanSeek":
-		return state.CanSeek
-	default:
-		return false
+func (s *linuxSession) publishVolume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.volumeTimer = nil
+	if !s.closed && s.state.Volume != s.props.GetMust(playerInterface, "Volume") {
+		if err := s.setProperty("Volume", s.state.Volume); err != nil {
+			s.fail(err)
+		}
 	}
 }
 
@@ -300,14 +320,16 @@ func trackPath(state State) dbus.ObjectPath {
 	return dbus.ObjectPath("/org/meiro/track/" + hex.EncodeToString([]byte(state.VideoID)))
 }
 
-func durationDistance(a, b time.Duration) time.Duration {
-	if a > b {
-		return a - b
-	}
-	return b - a
-}
-
 func (s *linuxSession) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.volumeTimer != nil {
+		s.volumeTimer.Stop()
+	}
 	if _, err := s.conn.ReleaseName(s.busName); err != nil {
 		_ = s.conn.Close()
 		return err

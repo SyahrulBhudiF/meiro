@@ -19,12 +19,14 @@ type macCommand struct {
 }
 
 type macSession struct {
-	mu       sync.Mutex
-	center   objc.ID
-	commands []macCommand
-	state    State
-	hasState bool
-	lastInfo time.Time
+	mu           sync.Mutex
+	center       objc.ID
+	remote       objc.ID
+	commands     []macCommand
+	state        State
+	hasState     bool
+	infoPosition time.Duration
+	infoAt       time.Time
 }
 
 // New registers metadata and transport commands with macOS Now Playing.
@@ -37,7 +39,7 @@ func New(controls Controls) (Session, error) {
 	if center == 0 || remote == 0 {
 		return nil, errors.New("macOS Now Playing services are unavailable")
 	}
-	s := &macSession{center: center}
+	s := &macSession{center: center, remote: remote}
 	s.addCommand(remote, "playCommand", controls.Play, nil)
 	s.addCommand(remote, "pauseCommand", controls.Pause, nil)
 	s.addCommand(remote, "togglePlayPauseCommand", controls.Toggle, nil)
@@ -66,50 +68,39 @@ func (s *macSession) addCommand(remote objc.ID, selector string, action func(), 
 }
 
 func (s *macSession) Update(state State) error {
+	if state.VideoID == "" || state.Status == "" {
+		state.Status = Stopped
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	objc.AutoreleasePool(func() {
-		remote := objc.ClassID("MPRemoteCommandCenter").Send(objc.Sel("sharedCommandCenter"))
-		s.setEnabled(remote, "playCommand", state.CanPlay)
-		s.setEnabled(remote, "pauseCommand", state.CanPause)
-		s.setEnabled(remote, "togglePlayPauseCommand", state.CanPlay || state.CanPause)
-		s.setEnabled(remote, "nextTrackCommand", state.CanNext)
-		s.setEnabled(remote, "previousTrackCommand", state.CanPrevious)
-		s.setEnabled(remote, "changePlaybackPositionCommand", state.CanSeek)
+		s.setEnabled("playCommand", state.CanPlay, s.state.CanPlay)
+		s.setEnabled("pauseCommand", state.CanPause, s.state.CanPause)
+		s.setEnabled("togglePlayPauseCommand", state.CanPlay || state.CanPause, s.state.CanPlay || s.state.CanPause)
+		s.setEnabled("nextTrackCommand", state.CanNext, s.state.CanNext)
+		s.setEnabled("previousTrackCommand", state.CanPrevious, s.state.CanPrevious)
+		s.setEnabled("changePlaybackPositionCommand", state.CanSeek, s.state.CanSeek)
 
-		metadataChanged := !s.hasState || state.VideoID != s.state.VideoID || state.Title != s.state.Title || state.Artist != s.state.Artist || state.Duration != s.state.Duration
+		metadataChanged := !s.hasState || !state.sameMetadata(s.state)
 		statusChanged := !s.hasState || state.Status != s.state.Status
 		positionChangedWhilePaused := state.Status != Playing && state.Position != s.state.Position
-		if metadataChanged || statusChanged || positionChangedWhilePaused || time.Since(s.lastInfo) >= time.Second {
-			if state.VideoID == "" {
-				s.center.Send(objc.Sel("setNowPlayingInfo:"), 0)
-				s.center.Send(objc.Sel("setPlaybackState:"), 3)
-				s.lastInfo = time.Now()
-				return
-			}
-			info := objc.ClassID("NSMutableDictionary").Send(objc.Sel("dictionary"))
-			if state.Title != "" {
-				info.Send(objc.Sel("setObject:forKey:"), objc.NSString(state.Title), objc.NSString("title"))
-			}
-			if state.Artist != "" {
-				info.Send(objc.Sel("setObject:forKey:"), objc.NSString(state.Artist), objc.NSString("artist"))
-			}
-			if state.Duration > 0 {
-				info.Send(objc.Sel("setObject:forKey:"), number(state.Duration.Seconds()), objc.NSString("playbackDuration"))
-			}
-			info.Send(objc.Sel("setObject:forKey:"), number(state.Position.Seconds()), objc.NSString("elapsedPlaybackTime"))
-			rate := float64(0)
+		seeked := s.hasState && state.SeekVersion != s.state.SeekVersion
+		// Correct non-linear progress such as buffering, without publishing
+		// again while the OS's extrapolated clock still agrees with the player.
+		drifted := s.hasState && state.Status == Playing &&
+			durationDistance(state.Position, s.infoPosition+time.Since(s.infoAt)) > time.Second
+		if metadataChanged || statusChanged || positionChangedWhilePaused || seeked || drifted {
+			s.publishInfo(state)
+		}
+		if statusChanged {
 			playbackState := 3 // MPNowPlayingPlaybackStateStopped
 			switch state.Status {
 			case Playing:
-				rate, playbackState = 1, 1 // Playing
+				playbackState = 1
 			case Paused:
-				playbackState = 2 // Paused
+				playbackState = 2
 			}
-			info.Send(objc.Sel("setObject:forKey:"), number(rate), objc.NSString("playbackRate"))
-			s.center.Send(objc.Sel("setNowPlayingInfo:"), info)
 			s.center.Send(objc.Sel("setPlaybackState:"), playbackState)
-			s.lastInfo = time.Now()
 		}
 	})
 	s.state = state
@@ -117,11 +108,41 @@ func (s *macSession) Update(state State) error {
 	return nil
 }
 
-func (s *macSession) setEnabled(remote objc.ID, selector string, enabled bool) {
-	command := remote.Send(objc.Sel(selector))
+func (s *macSession) setEnabled(selector string, enabled, previous bool) {
+	if s.hasState && enabled == previous {
+		return
+	}
+	command := s.remote.Send(objc.Sel(selector))
 	if command != 0 {
 		command.Send(objc.Sel("setEnabled:"), enabled)
 	}
+}
+
+// publishInfo runs under mu. macOS advances elapsed time from playbackRate,
+// so ordinary progress does not need another dictionary.
+func (s *macSession) publishInfo(state State) {
+	s.infoPosition, s.infoAt = state.Position, time.Now()
+	if state.VideoID == "" {
+		s.center.Send(objc.Sel("setNowPlayingInfo:"), 0)
+		return
+	}
+	info := objc.ClassID("NSMutableDictionary").Send(objc.Sel("dictionary"))
+	if state.Title != "" {
+		info.Send(objc.Sel("setObject:forKey:"), objc.NSString(state.Title), objc.NSString("title"))
+	}
+	if state.Artist != "" {
+		info.Send(objc.Sel("setObject:forKey:"), objc.NSString(state.Artist), objc.NSString("artist"))
+	}
+	if state.Duration > 0 {
+		info.Send(objc.Sel("setObject:forKey:"), number(state.Duration.Seconds()), objc.NSString("playbackDuration"))
+	}
+	info.Send(objc.Sel("setObject:forKey:"), number(state.Position.Seconds()), objc.NSString("elapsedPlaybackTime"))
+	rate := float64(0)
+	if state.Status == Playing {
+		rate = 1
+	}
+	info.Send(objc.Sel("setObject:forKey:"), number(rate), objc.NSString("playbackRate"))
+	s.center.Send(objc.Sel("setNowPlayingInfo:"), info)
 }
 
 func number(value float64) objc.ID {

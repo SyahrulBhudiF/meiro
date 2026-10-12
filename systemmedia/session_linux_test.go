@@ -95,6 +95,14 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 	if err := statusValue.Store(&status); err != nil || status != string(Playing) {
 		t.Errorf("MPRIS status = %q, err %v; want %q", status, err, Playing)
 	}
+	var volume float64
+	volumeValue, err := object.GetProperty(playerInterface + ".Volume")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := volumeValue.Store(&volume); err != nil || volume != state.Volume {
+		t.Errorf("initial MPRIS volume = %v, err %v; want %v", volume, err, state.Volume)
+	}
 	var position int64
 	positionValue, err := object.GetProperty(playerInterface + ".Position")
 	if err != nil {
@@ -142,6 +150,61 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 	}
 	if got := <-seeks; got != 12*time.Second {
 		t.Errorf("SetPosition requested %v, want 12s", got)
+	}
+	signals := make(chan *dbus.Signal, 4)
+	client.Signal(signals)
+	if err := client.AddMatchSignal(
+		dbus.WithMatchInterface(playerInterface),
+		dbus.WithMatchMember("Seeked"),
+		dbus.WithMatchObjectPath(objectPath),
+	); err != nil {
+		t.Fatal(err)
+	}
+	state.Position = 13 * time.Second
+	state.SeekVersion++
+	linux.Update(state)
+	select {
+	case signal := <-signals:
+		var position int64
+		if err := dbus.Store(signal.Body, &position); err != nil || position != int64(state.Position/time.Microsecond) {
+			t.Errorf("Seeked signal = %v, %v; want %v", signal.Body, err, state.Position/time.Microsecond)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing Seeked signal")
+	}
+	if err := client.AddMatchSignal(
+		dbus.WithMatchInterface("org.freedesktop.DBus.Properties"),
+		dbus.WithMatchMember("PropertiesChanged"),
+		dbus.WithMatchObjectPath(objectPath),
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, volume := range []float64{0.2, 0.9, 0.83} {
+		state.Volume = volume
+		linux.Update(state)
+	}
+	select {
+	case signal := <-signals:
+		t.Fatalf("volume published before coalescing interval: %s", signal.Name)
+	case <-time.After(volumeInterval / 2):
+	}
+	select {
+	case signal := <-signals:
+		var iface string
+		var changes map[string]dbus.Variant
+		var invalidated []string
+		if err := dbus.Store(signal.Body, &iface, &changes, &invalidated); err != nil {
+			t.Fatal(err)
+		}
+		volume, ok := changes["Volume"]
+		if !ok {
+			t.Fatalf("coalesced change omitted Volume: %+v", changes)
+		}
+		if got := volume.Value(); iface != playerInterface || got != 0.83 {
+			t.Errorf("coalesced volume = %v on %s, want 0.83 on %s", got, iface, playerInterface)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing coalesced volume signal")
 	}
 	if err := object.Call("org.freedesktop.DBus.Properties.Set", 0, playerInterface, "Volume", dbus.MakeVariant(0.4)).Err; err != nil {
 		t.Fatal(err)
