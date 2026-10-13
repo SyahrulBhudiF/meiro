@@ -173,7 +173,7 @@ const albumResponse = `{"contents":{"musicShelfRenderer":{"contents":[
 ]}}}`
 
 const playlistResponse = `{"contents":{"playlistVideoListRenderer":{"contents":[
-	{"playlistVideoRenderer":{"videoId":"playlist-video","title":{"simpleText":"Playlist video"},"lengthText":{"simpleText":"5:21"}}}
+	{"playlistVideoRenderer":{"videoId":"playlist-video","playlistItemData":{"playlistSetVideoId":"set-video-1"},"title":{"simpleText":"Playlist video"},"lengthText":{"simpleText":"5:21"}}}
 ]}}}`
 
 // artistResponse carries the heading an artist page puts over its content.

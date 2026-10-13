@@ -33,15 +33,16 @@ type SearchOptions struct {
 // MusicItem is the common subset of YouTube Music song, video, album, artist,
 // and playlist renderers.
 type MusicItem struct {
-	ID         string   `json:"id,omitempty"`
-	VideoID    string   `json:"videoId,omitempty"`
-	BrowseID   string   `json:"browseId,omitempty"`
-	PlaylistID string   `json:"playlistId,omitempty"`
-	Title      string   `json:"title,omitempty"`
-	Subtitle   string   `json:"subtitle,omitempty"`
-	Kind       ItemKind `json:"kind,omitempty"`
-	Duration   string   `json:"duration,omitempty"`
-	Thumbnail  string   `json:"thumbnail,omitempty"`
+	ID            string   `json:"id,omitempty"`
+	VideoID       string   `json:"videoId,omitempty"`
+	BrowseID      string   `json:"browseId,omitempty"`
+	PlaylistID    string   `json:"playlistId,omitempty"`
+	PlaylistSetID string   `json:"playlistSetVideoId,omitempty"`
+	Title         string   `json:"title,omitempty"`
+	Subtitle      string   `json:"subtitle,omitempty"`
+	Kind          ItemKind `json:"kind,omitempty"`
+	Duration      string   `json:"duration,omitempty"`
+	Thumbnail     string   `json:"thumbnail,omitempty"`
 }
 
 // SearchResult contains the parsed music items of a search.
@@ -1214,6 +1215,7 @@ func parseMusicItem(kind ItemKind, renderer *jsonObject) MusicItem {
 		item.VideoID = rendererVideoID(renderer)
 	}
 	item.PlaylistID, _ = renderer.get("playlistId").(string)
+	item.PlaylistSetID = nestedString(renderer.get("playlistItemData"), "playlistSetVideoId")
 	item.BrowseID = navigationID(renderer.get("navigationEndpoint"))
 	if kind == KindTrack || kind == KindVideo {
 		if artistID := rendererArtistBrowseID(renderer); artistID != "" {

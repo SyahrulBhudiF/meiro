@@ -69,6 +69,29 @@ func TestClientSessionAgainstFakeInnerTube(t *testing.T) {
 	if len(writes) != 1 || writes[0]["playlistId"] != "PLhype" {
 		t.Fatalf("writes = %#v", writes)
 	}
+	if err := signedIn.RemoveFromPlaylist(ctx, "VLPLhype", "set-video-1"); err != nil {
+		t.Fatalf("removal = %v", err)
+	}
+	if len(writes) != 2 || writes[1]["playlistId"] != "PLhype" {
+		t.Fatalf("removal writes = %#v", writes)
+	}
+	actions, ok := writes[1]["actions"].([]any)
+	if !ok || len(actions) != 1 {
+		t.Fatalf("removal actions = %#v", writes[1]["actions"])
+	}
+	action, ok := actions[0].(map[string]any)
+	if !ok || action["action"] != "ACTION_REMOVE_VIDEO" || action["setVideoId"] != "set-video-1" {
+		t.Fatalf("removal action = %#v", actions[0])
+	}
+	if err := client.RemoveFromPlaylist(ctx, "PLhype", "set-video-1"); err == nil {
+		t.Fatal("signed-out removal succeeded")
+	}
+	if err := signedIn.RemoveFromPlaylist(ctx, "", "set-video-1"); err == nil {
+		t.Fatal("removal without a playlist succeeded")
+	}
+	if err := signedIn.RemoveFromPlaylist(ctx, "PLhype", " "); err == nil {
+		t.Fatal("removal without an entry ID succeeded")
+	}
 
 	if _, err := client.GetAlbum(ctx, "MPREb_missing"); err == nil {
 		t.Error("an HTTP failure from the server was not reported")

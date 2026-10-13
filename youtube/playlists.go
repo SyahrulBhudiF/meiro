@@ -97,6 +97,44 @@ func (c *Client) AddToPlaylist(ctx context.Context, playlistID, videoID string) 
 	return nil
 }
 
+// RemoveFromPlaylist removes one occurrence of a video from a playlist. The
+// playlist-set ID names the occurrence, so duplicate songs remain distinct.
+func (c *Client) RemoveFromPlaylist(ctx context.Context, playlistID, playlistSetID string) error {
+	if c.cookieAuth == nil {
+		return errors.New("youtube: RemoveFromPlaylist requires cookie authentication")
+	}
+	playlistID = strings.TrimPrefix(strings.TrimSpace(playlistID), "VL")
+	playlistSetID = strings.TrimSpace(playlistSetID)
+	switch {
+	case playlistID == "":
+		return errors.New("youtube: RemoveFromPlaylist needs a playlist")
+	case playlistSetID == "":
+		return errors.New("youtube: RemoveFromPlaylist needs a playlist entry")
+	}
+	raw, err := c.execute(ctx, "browse/edit_playlist", map[string]any{
+		"playlistId": playlistID,
+		"actions": []map[string]any{
+			{"action": "ACTION_REMOVE_VIDEO", "setVideoId": playlistSetID},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return fmt.Errorf("youtube: decode browse/edit_playlist response: %w", err)
+	}
+	if !strings.Contains(response.Status, "SUCCEEDED") {
+		if response.Status != "" {
+			return fmt.Errorf("youtube: the playlist refused to remove the song (%s)", response.Status)
+		}
+		return refusedWrite("browse/edit_playlist", raw)
+	}
+	return nil
+}
+
 // videoIDs returns the videos of a write, without the blanks and the repeats.
 func videoIDs(videos []string) []string {
 	var ids []string

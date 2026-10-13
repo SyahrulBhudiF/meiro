@@ -244,6 +244,24 @@ func libraryPlaylists(library *youtube.BrowseResult) []youtube.MusicItem {
 }
 
 // choosePlaylist puts the song the dialog holds into the playlist chosen.
+func (a *app) removeFromPlaylist(playlistID string, item youtube.MusicItem) {
+	client := a.client()
+	spawn(a, func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), playlistTimeout)
+		defer cancel()
+		return client.RemoveFromPlaylist(ctx, playlistID, item.PlaylistSetID)
+	}, func(err error) {
+		if err != nil {
+			a.notice = "Could not remove “" + item.Title + "” from playlist: " + firstLine(err.Error())
+			return
+		}
+		a.notice = "Removed “" + item.Title + "” from playlist"
+		if route, currentID := a.route(); route.id == routePlaylist && currentID == playlistID {
+			a.loadPage(route, playlistID)
+		}
+	})
+}
+
 func (a *app) choosePlaylist(playlist youtube.MusicItem) {
 	d := a.addToPlaylist
 	target := playlist.Target()
