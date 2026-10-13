@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ebitengine/oto/v3"
+	"github.com/elianiva/meiro/internal/proc"
 )
 
 const (
@@ -339,17 +341,21 @@ func (p *Player) start(url string, at time.Duration, paused bool) error {
 	}
 	p.stop()
 
-	cmd := exec.Command(ffmpeg, streamArgs(url, at)...) //nolint:noctx // the player ends ffmpeg itself when the stream is replaced or stopped
-	pipe, err := cmd.StdoutPipe()
+	cmd := exec.Command(ffmpeg, streamArgs(url, at)...)
+	proc.HideWindow(cmd)
+	pipe, writer, err := os.Pipe()
 	if err != nil {
-		return fmt.Errorf("player: %w", err)
+		return fmt.Errorf("player: create audio pipe: %w", err)
 	}
+	cmd.Stdout = writer
 	stderr := &boundedBuffer{limit: 4096}
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		_ = pipe.Close()
+		_ = writer.Close()
 		return fmt.Errorf("player: start ffmpeg: %w", err)
 	}
+	_ = writer.Close()
 
 	s := &session{
 		url: url, cmd: cmd, pipe: pipe, stderr: stderr,
@@ -371,7 +377,10 @@ func (p *Player) start(url string, at time.Duration, paused bool) error {
 // streamArgs is the ffmpeg command line that decodes url from at into signed
 // 16-bit stereo PCM on stdout.
 func streamArgs(url string, at time.Duration) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-xerror"}
+	args := []string{
+		"-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
+		"-protocol_whitelist", "http,https,tcp,tls,crypto,file",
+	}
 	if isHTTP(url) {
 		args = append(args,
 			"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
@@ -408,15 +417,9 @@ func isHTTP(rawURL string) bool {
 	}
 }
 
-// reap waits for ffmpeg to exit and records how, then marks the session done.
+// reap observes process completion independently from the audio reader, so a
+// paused session cannot prevent an ffmpeg exit from being noticed.
 func (p *Player) reap(s *session) {
-	// Wait closes the pipe once ffmpeg has exited, which would cut off the
-	// samples still in it and keep the stream from ever reaching its end. So
-	// wait for the reader to have taken them all, or for the stop.
-	select {
-	case <-s.source.finished:
-	case <-s.quit:
-	}
 	waitErr := s.cmd.Wait()
 	p.mu.Lock()
 	s.waitErr = waitErr
