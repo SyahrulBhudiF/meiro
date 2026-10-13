@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/ebitengine/oto/v3"
-	"github.com/elianiva/meiro/internal/proc"
 )
 
 const (
@@ -222,7 +221,9 @@ func (p *Player) Buffering() bool {
 	}
 	select {
 	case <-s.done:
-		return false // ffmpeg stopped without a sample; Failure says why
+		// Stopped without a sample: Failure says why, unless the reader has
+		// yet to take what ffmpeg wrote before it exited.
+		return p.pendingSamples(s)
 	default:
 		return true
 	}
@@ -282,7 +283,7 @@ func (p *Player) Failure() string {
 	p.mu.Lock()
 	finished := s.waitErr == nil && message == "" && s.source.read.Load() > 0
 	p.mu.Unlock()
-	if finished {
+	if finished || p.pendingSamples(s) {
 		return ""
 	}
 	if message == "" {
@@ -341,8 +342,8 @@ func (p *Player) start(url string, at time.Duration, paused bool) error {
 	}
 	p.stop()
 
-	cmd := exec.Command(ffmpeg, streamArgs(url, at)...)
-	proc.HideWindow(cmd)
+	cmd := exec.Command(ffmpeg, streamArgs(url, at)...) //nolint:noctx // the player ends ffmpeg itself when the stream is replaced or stopped
+	hideWindow(cmd)
 	pipe, writer, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("player: create audio pipe: %w", err)
@@ -377,12 +378,11 @@ func (p *Player) start(url string, at time.Duration, paused bool) error {
 // streamArgs is the ffmpeg command line that decodes url from at into signed
 // 16-bit stereo PCM on stdout.
 func streamArgs(url string, at time.Duration) []string {
-	args := []string{
-		"-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
-		"-protocol_whitelist", "http,https,tcp,tls,crypto,file",
-	}
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-xerror"}
 	if isHTTP(url) {
+		// A remote stream, or a manifest it names, cannot reach local files.
 		args = append(args,
+			"-protocol_whitelist", "http,https,httpproxy,tcp,tls,crypto",
 			"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
 			"-rw_timeout", strconv.FormatInt(httpReadTimeout.Microseconds(), 10),
 			"-user_agent", userAgent,
@@ -418,13 +418,37 @@ func isHTTP(rawURL string) bool {
 }
 
 // reap observes process completion independently from the audio reader, so a
-// paused session cannot prevent an ffmpeg exit from being noticed.
+// paused session cannot prevent an ffmpeg exit from being noticed. The pipe is
+// ours rather than Wait's, so the samples still in it survive the exit; reap
+// closes it once the reader has taken them all, or the app has stopped.
 func (p *Player) reap(s *session) {
 	waitErr := s.cmd.Wait()
 	p.mu.Lock()
 	s.waitErr = waitErr
 	p.mu.Unlock()
 	close(s.done)
+	select {
+	case <-s.source.finished:
+	case <-s.quit:
+	}
+	_ = s.pipe.Close()
+}
+
+// pendingSamples reports whether ffmpeg exited cleanly without the reader
+// having taken anything yet, so its output may still sit in the pipe.
+func (p *Player) pendingSamples(s *session) bool {
+	p.mu.Lock()
+	clean := s.waitErr == nil
+	p.mu.Unlock()
+	if !clean || s.stderr.String() != "" || s.source.read.Load() > 0 {
+		return false
+	}
+	select {
+	case <-s.source.finished:
+		return false
+	default:
+		return true
+	}
 }
 
 // stop ends the current stream, if any. The caller holds ctl and not mu: the

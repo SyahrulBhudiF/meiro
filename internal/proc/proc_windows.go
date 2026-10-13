@@ -14,6 +14,8 @@ func hardenCommand(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		return exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid)).Run()
+		kill := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(cmd.Process.Pid))
+		HideWindow(kill)
+		return kill.Run()
 	}
 }

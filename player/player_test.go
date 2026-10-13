@@ -1,10 +1,12 @@
 package player
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,16 +14,17 @@ import (
 func TestStreamArgsProtocolWhitelist(t *testing.T) {
 	args := streamArgs("https://media.test/audio", 0)
 	index := slices.Index(args, "-protocol_whitelist")
-	if index < 0 || index+1 == len(args) || args[index+1] != "http,https,tcp,tls,crypto,file" {
-		t.Fatalf("protocol whitelist args = %v", args)
+	if index < 0 || index+1 == len(args) {
+		t.Fatalf("no protocol whitelist in %v", args)
+	}
+	if slices.Contains(strings.Split(args[index+1], ","), "file") {
+		t.Fatalf("remote stream may read local files: %q", args[index+1])
 	}
 }
 
-func TestStreamArgsKeepsLocalFilesAllowed(t *testing.T) {
-	args := streamArgs("/tmp/audio.wav", 0)
-	index := slices.Index(args, "-protocol_whitelist")
-	if index < 0 || index+1 == len(args) || args[index+1] != "http,https,tcp,tls,crypto,file" {
-		t.Fatalf("local-file protocol whitelist args = %v", args)
+func TestStreamArgsLocalFilesHaveNoWhitelist(t *testing.T) {
+	if args := streamArgs("/tmp/audio.wav", 0); slices.Contains(args, "-protocol_whitelist") {
+		t.Fatalf("local file got a whitelist that would block it: %v", args)
 	}
 }
 
@@ -47,12 +50,45 @@ func TestReapObservesExitWhileReaderIsPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = writer.Close()
-	s := &session{cmd: cmd, done: make(chan struct{}), source: newCountingReader(pipe)}
+	s := &session{cmd: cmd, pipe: pipe, done: make(chan struct{}), quit: make(chan struct{}), source: newCountingReader(pipe)}
 	go p.reap(s)
 	select {
 	case <-s.done:
 	case <-time.After(time.Second):
 		t.Fatal("process exit was not observed while the reader was idle")
 	}
-	_ = pipe.Close()
+	close(s.quit)
+}
+
+func TestCleanExitWithUnreadOutputIsNotAFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test command uses sh")
+	}
+	p := &Player{}
+	cmd := exec.Command("sh", "-c", "printf abcd")
+	pipe, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout = writer
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = writer.Close()
+	s := &session{
+		cmd: cmd, pipe: pipe, stderr: &boundedBuffer{limit: 16},
+		done: make(chan struct{}), quit: make(chan struct{}), source: newCountingReader(pipe),
+	}
+	go p.reap(s)
+	<-s.done
+	if !p.pendingSamples(s) {
+		t.Fatal("clean exit with unread output must not read as a failed stream")
+	}
+	data, err := io.ReadAll(s.source)
+	if err != nil || string(data) != "abcd" {
+		t.Fatalf("read %q, %v: output lost after exit", data, err)
+	}
+	if p.pendingSamples(s) {
+		t.Fatal("nothing is pending once the reader has the data")
+	}
 }
