@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,13 +246,143 @@ func TestVolumeAndMutePersistToSettings(t *testing.T) {
 	}
 }
 
-func TestAutoPlayAsksYouTubeForWhatFollows(t *testing.T) {
+type playbackRoundTrip func(*http.Request) (*http.Response, error)
+
+func (roundTrip playbackRoundTrip) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+func TestAutoPlayFetchesAndQueuesRecommendations(t *testing.T) {
+	var requests atomic.Int32
+	client := youtube.NewClient(youtube.Options{
+		HTTPClient: &http.Client{Transport: playbackRoundTrip(func(request *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"contents":{"playlistPanelRenderer":{"contents":[{"playlistPanelVideoRenderer":{"videoId":"recommended","title":{"runs":[{"text":"Recommended track"}]}}}]}}}`)),
+				Request:    request,
+			}, nil
+		})},
+	})
 	a, _ := playbackApp(t)
+	a.account.public = client
 	a.settings.AutoPlay = true
 	q := tracks("a")
 	a.play(q[0], q)
-	if !a.upNext.fetched && !a.upNext.load.busy() {
-		t.Error("autoplay never asked YouTube Music for an up-next queue")
+
+	if requests.Load() != 1 {
+		t.Fatalf("up-next requests = %d, want one", requests.Load())
+	}
+	if a.upNext.load.busy() {
+		t.Fatal("up-next task remained busy after a successful response")
+	}
+	if got := ids(a.queue.items); !slices.Equal(got, []string{"a", "recommended"}) {
+		t.Fatalf("queue = %v, want chosen and recommended tracks", got)
+	}
+	if a.queue.recStart != 1 || a.upNext.err != "" {
+		t.Errorf("recommendation boundary = %d, error = %q", a.queue.recStart, a.upNext.err)
+	}
+}
+
+func TestAutoPlayRetriesRecommendationsWhenChosenQueueRunsOut(t *testing.T) {
+	var requests atomic.Int32
+	client := youtube.NewClient(youtube.Options{
+		HTTPClient: &http.Client{Transport: playbackRoundTrip(func(request *http.Request) (*http.Response, error) {
+			count := requests.Add(1)
+			response := `{"contents":{"playlistPanelRenderer":{"contents":[]}}}`
+			if count == 2 {
+				response = `{"contents":{"playlistPanelRenderer":{"contents":[{"playlistPanelVideoRenderer":{"videoId":"recommended","title":{"runs":[{"text":"Recommended track"}]}}}]}}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(response)),
+				Request:    request,
+			}, nil
+		})},
+	})
+	a, _ := playbackApp(t)
+	a.account.public = client
+	a.settings.AutoPlay = true
+	q := tracks("first", "last")
+	a.play(q[0], q)
+	if requests.Load() != 1 || a.queue.len() != 2 {
+		t.Fatalf("initial fetch: requests=%d queue=%v", requests.Load(), ids(a.queue.items))
+	}
+
+	a.trackEnded()
+	if a.current.VideoID != "last" {
+		t.Fatalf("current track = %q, want last chosen track", a.current.VideoID)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("requests after final chosen track started = %d, want retry", requests.Load())
+	}
+	if a.upNext.load.busy() {
+		t.Fatal("recommendation retry remained busy after successful response")
+	}
+	if got := ids(a.queue.items); !slices.Equal(got, []string{"first", "last", "recommended"}) {
+		t.Fatalf("queue after retry = %v, want recommendation appended", got)
+	}
+}
+
+func TestQueueDoesNotMoveWhileRecommendationsLoad(t *testing.T) {
+	a, _ := playbackApp(t)
+	a.current = tracks("a")[0]
+	a.queue.replace(a.current, tracks("a", "b"), 0, "Test queue")
+	a.settings.AutoPlay = true
+	a.nowPlaying.open, a.nowPlaying.queueOnly, a.nowPlaying.playerShown = true, true, true
+	tt := ui.NewTester(a.nowPlayingView, 1000, 700)
+	rowWithoutStatus, ok := tt.Find("Track a")
+	if !ok {
+		t.Fatalf("queue row missing from UI: %q", tt.Texts())
+	}
+
+	_, cancel := context.WithCancel(context.Background())
+	a.upNext.load.cancel = cancel
+	a.refresh()
+	tt.Frame()
+	rowWithStatus, ok := tt.Find("Track a")
+	if !ok {
+		t.Fatalf("queue row missing while fetching: %q", tt.Texts())
+	}
+	if tt.HasText("Finding recommendations…") {
+		t.Fatal("transient loading status appeared while fetching recommendations")
+	}
+	if rowWithStatus.Y != rowWithoutStatus.Y {
+		t.Errorf("queue row moved from y=%v to y=%v while status appeared", rowWithoutStatus.Y, rowWithStatus.Y)
+	}
+	a.upNext.load.stop()
+	cancel()
+}
+
+func TestAutoPlayCompletesWhenNoRecommendationsAreReturned(t *testing.T) {
+	var requests atomic.Int32
+	client := youtube.NewClient(youtube.Options{
+		HTTPClient: &http.Client{Transport: playbackRoundTrip(func(request *http.Request) (*http.Response, error) {
+			requests.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"contents":{"playlistPanelRenderer":{"contents":[]}}}`)),
+				Request:    request,
+			}, nil
+		})},
+	})
+	a, _ := playbackApp(t)
+	a.account.public = client
+	a.settings.AutoPlay = true
+	q := tracks("a")
+	a.play(q[0], q)
+
+	if requests.Load() != 1 {
+		t.Fatalf("up-next requests = %d, want one", requests.Load())
+	}
+	if a.upNext.load.busy() {
+		t.Fatal("up-next task remained busy after an empty successful response")
+	}
+	if got := ids(a.queue.items); !slices.Equal(got, []string{"a"}) {
+		t.Fatalf("queue = %v, want only the chosen track", got)
 	}
 }
 

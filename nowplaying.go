@@ -486,12 +486,11 @@ func (a *app) queueView(c *ui.Context) {
 			a.setAutoPlay(on)
 		}
 	})
-	switch {
-	case a.upNext.load.busy():
-		m3.Text(c, m3.BodySmall, "Finding recommendations…").Padding(0, 16, 4).TextColor(sc.OnSurfaceVariant)
-	case a.upNext.err != "":
-		m3.Text(c, m3.BodySmall, "Recommendations aren't available right now.").Padding(0, 16, 4).TextColor(sc.Error)
-	}
+	ui.Column(c).FillWidth().Height(28).Shrink(0).Padding(0, 16, 4).Children(func() {
+		if a.upNext.err != "" {
+			m3.Text(c, m3.BodySmall, "Recommendations aren't available right now.").TextColor(sc.Error)
+		}
+	})
 	if q.len() == 0 {
 		a.message(c, m3.IconQueue, "The queue is empty", "", "", nil)
 		return
