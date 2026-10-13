@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"runtime"
 	"sync"
@@ -398,43 +399,37 @@ func (api *mprisPlayer) Stop() *dbus.Error      { call(api.controls.Stop); retur
 func (api *mprisPlayer) Play() *dbus.Error      { call(api.controls.Play); return nil }
 func (api *mprisPlayer) SeekBy(offset int64) *dbus.Error {
 	state := api.state()
-	const maxDuration = time.Duration(1<<63 - 1)
-	const minDuration = time.Duration(-1 << 63)
-	position := state.Position
-	if offset > 0 && offset > int64(maxDuration/time.Microsecond) {
-		position = maxDuration
-	} else if offset < 0 && offset < int64(minDuration/time.Microsecond) {
-		position = minDuration
-	} else {
-		delta := time.Duration(offset) * time.Microsecond
-		if delta > 0 && position > maxDuration-delta {
-			position = maxDuration
-		} else if delta < 0 && position < minDuration-delta {
-			position = minDuration
-		} else {
-			position += delta
-		}
+	// Work in microseconds, the unit D-Bus uses, and bound the offset so the
+	// sum cannot overflow before it is clamped to the track.
+	const bound = 1 << 62
+	offset = max(-bound, min(bound, offset))
+	api.seek(clampPosition(state.Position.Microseconds()+offset, state.Duration))
+	return nil
+}
+
+// SetPosition follows the MPRIS rule that a position outside the track, or one
+// for a track that is no longer current, does nothing.
+func (api *mprisPlayer) SetPosition(trackID dbus.ObjectPath, position int64) *dbus.Error {
+	state := api.state()
+	if trackID != trackPath(state) || position < 0 || (state.Duration > 0 && position > state.Duration.Microseconds()) {
+		return nil
 	}
 	api.seek(clampPosition(position, state.Duration))
 	return nil
 }
 
-func (api *mprisPlayer) SetPosition(trackID dbus.ObjectPath, position int64) *dbus.Error {
-	state := api.state()
-	if trackID == trackPath(state) {
-		api.seek(clampPosition(time.Duration(position)*time.Microsecond, state.Duration))
-	}
-	return nil
-}
-
-func clampPosition(position, duration time.Duration) time.Duration {
-	if position < 0 {
+// clampPosition turns a position in microseconds into one inside the track.
+func clampPosition(micros int64, duration time.Duration) time.Duration {
+	if micros < 0 {
 		return 0
 	}
-	if duration > 0 && position > duration {
+	if limit := duration.Microseconds(); duration > 0 && micros > limit {
 		return duration
 	}
-	return position
+	if micros > math.MaxInt64/int64(time.Microsecond) {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(micros) * time.Microsecond
 }
 
 func (*mprisPlayer) OpenUri(string) *dbus.Error {

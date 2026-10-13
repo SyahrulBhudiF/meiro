@@ -151,8 +151,6 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 		want     time.Duration
 	}{
 		{"in range", 12 * time.Second, 12 * time.Second},
-		{"lower clamp", -time.Second, 0},
-		{"upper clamp", 4 * time.Minute, state.Duration},
 	} {
 		if err := object.Call(playerInterface+".SetPosition", 0, trackID, int64(test.position/time.Microsecond)).Err; err != nil {
 			t.Fatalf("%s: %v", test.name, err)
@@ -160,6 +158,19 @@ func TestMPRISSessionPublishesStateAndForwardsCommands(t *testing.T) {
 		if got := <-seeks; got != test.want {
 			t.Errorf("SetPosition %s = %v, want %v", test.name, got, test.want)
 		}
+	}
+	// Positions outside the track are ignored, as the MPRIS spec says.
+	for _, position := range []time.Duration{-time.Second, 4 * time.Minute} {
+		if err := object.Call(playerInterface+".SetPosition", 0, trackID, int64(position/time.Microsecond)).Err; err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Seek is a round trip behind these calls, so a forwarded seek would be queued by now.
+	if err := object.Call(playerInterface+".Seek", 0, int64(time.Second/time.Microsecond)).Err; err != nil {
+		t.Fatal(err)
+	}
+	if got := <-seeks; got != 43*time.Second {
+		t.Errorf("seek after out-of-range SetPosition = %v, want 43s (earlier calls ignored)", got)
 	}
 }
 
