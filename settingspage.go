@@ -43,6 +43,7 @@ func (a *app) settingsPage(c *ui.Context) {
 			a.accountCard(c)
 			a.keyboardCard(c)
 			a.logsCard(c)
+			a.historyCard(c)
 		})
 	})
 }

@@ -1,6 +1,8 @@
 package history
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,6 +25,25 @@ func TestSummarizeCountsTheRangeOnly(t *testing.T) {
 	}
 	if s.TopTracks[0].Title != "A" || s.TopTracks[0].Plays != 2 {
 		t.Errorf("top tracks = %+v", s.TopTracks)
+	}
+}
+
+func TestReadCapsExistingHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	entries := make([]Entry, MaxEntries+1)
+	for i := range entries {
+		entries[i].VideoID = string(rune(i + 1))
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := Read(path)
+	if len(got) != MaxEntries || got[0].VideoID != entries[1].VideoID || got[MaxEntries-1].VideoID != entries[MaxEntries].VideoID {
+		t.Fatalf("read did not keep the newest %d entries", MaxEntries)
 	}
 }
 

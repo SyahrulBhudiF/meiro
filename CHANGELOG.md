@@ -8,6 +8,10 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Added
+
+- Cap local listening history and let users clear it from Settings.
+
 ## [0.1.0]
 
 <!-- Add the release date when v0.1.0 is tagged: ## [0.1.0] - YYYY-MM-DD -->

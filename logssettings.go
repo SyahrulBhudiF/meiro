@@ -23,7 +23,18 @@ func (a *app) logsCard(c *ui.Context) {
 	})
 }
 
-// openLogs shows the folder of the log files in the system's file manager.
+// historyCard lets the user remove locally stored plays used for stats.
+func (a *app) historyCard(c *ui.Context) {
+	a.settingsCard(c, "Listening history", m3.IconHistory, func() {
+		ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
+			settingLabel(c, "Plays on this device", "This history powers your listening stats.").Grow(1)
+			if m3.Button(c, m3.ButtonSpec{Label: "Clear history", Kind: m3.Outlined, Size: m3.Medium56, Key: "clear-history"}).Clicked() {
+				a.clearHistory()
+			}
+		})
+	})
+}
+
 func (a *app) openLogs() {
 	dir := a.logsDir
 	if dir == "" {

@@ -56,7 +56,7 @@ func Read(path string) []Entry {
 		log.Printf("listening history in %s is not readable, starting fresh: %v", path, err)
 		return nil
 	}
-	return entries
+	return Append(nil, entries...)
 }
 
 // Write replaces a history file atomically.

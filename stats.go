@@ -39,6 +39,9 @@ func (a *app) loadHistory() {
 	a.historyLoading = true
 	path := a.historyPath
 	spawn(a, func() []history.Entry { return history.Read(path) }, func(entries []history.Entry) {
+		if !a.historyLoading {
+			return
+		}
 		pending := len(a.history) > 0
 		a.history = history.Append(entries, a.history...)
 		a.historyLoaded, a.historyLoading = true, false
@@ -61,6 +64,14 @@ func (a *app) saveHistory() {
 			log.Printf("saving listening history: %v", err)
 		}
 	})
+}
+
+func (a *app) clearHistory() {
+	a.history = nil
+	a.historyLoaded = true
+	a.historyLoading = false
+	a.stats = statsMemo{}
+	a.saveHistory()
 }
 
 // statsMemo holds the summary the stats page last built, and what it was built

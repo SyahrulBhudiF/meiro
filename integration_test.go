@@ -16,6 +16,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/elianiva/meiro/internal/cookies"
+	"github.com/elianiva/meiro/internal/history"
 	"github.com/elianiva/meiro/internal/settings"
 	"github.com/elianiva/meiro/youtube"
 )
@@ -371,6 +372,56 @@ func TestHistoryLoadMergesPendingPlays(t *testing.T) {
 	finish()
 	if len(a.history) != 2 || a.history[0].VideoID != "old" || a.history[1].VideoID != "new" {
 		t.Fatalf("history = %+v", a.history)
+	}
+}
+
+func TestClearHistoryWhileLoadingDoesNotRestoreEntries(t *testing.T) {
+	a := newTestApp()
+	a.historyPath = filepath.Join(t.TempDir(), "history.json")
+	var finish func()
+	a.run = func(work func()) { finish = work }
+	a.loadHistory()
+	if err := os.WriteFile(a.historyPath, []byte(`[{"videoId":"old","playedAt":"2026-01-01T00:00:00Z"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a.run = func(work func()) { work() }
+	a.clearHistory()
+	finish()
+	if len(a.history) != 0 || !a.historyLoaded {
+		t.Fatalf("history after clearing while loading = %+v", a.history)
+	}
+	if got := history.Read(a.historyPath); len(got) != 0 {
+		t.Fatalf("persisted history after clear = %+v", got)
+	}
+}
+
+func TestStatsPageReadsPersistedHistory(t *testing.T) {
+	a := newTestApp()
+	a.historyPath = filepath.Join(t.TempDir(), "history.json")
+	if err := history.Write(a.historyPath, []history.Entry{{VideoID: "saved", Title: "Saved song", Artist: "Saved artist", PlayedAt: time.Now()}}); err != nil {
+		t.Fatal(err)
+	}
+	tt := open(a, "/stats")
+	if !tt.HasText("Saved song") || !tt.HasText("Saved artist") {
+		t.Fatal("stats page did not show persisted history")
+	}
+}
+
+func TestClearHistoryFromSettings(t *testing.T) {
+	a := newTestApp()
+	a.historyPath = filepath.Join(t.TempDir(), "history.json")
+	a.history = []history.Entry{{VideoID: "saved", PlayedAt: time.Now()}}
+	a.historyLoaded = true
+	if err := history.Write(a.historyPath, a.history); err != nil {
+		t.Fatal(err)
+	}
+	a.router.Push("/settings")
+	tt := ui.NewTester(a.view, 1000, 4000)
+	if err := tt.Click("Clear history"); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.history) != 0 || len(history.Read(a.historyPath)) != 0 {
+		t.Fatal("clear history did not remove entries from memory and disk")
 	}
 }
 
