@@ -17,7 +17,6 @@ const (
 	playlistSortTitle
 	playlistSortArtist
 	playlistSortDuration
-	playlistSortDateAdded
 )
 
 // playlistSort is one playlist page's ordering choice. Original is the zero
@@ -39,8 +38,6 @@ func (s playlistSort) label() string {
 		return "Artist"
 	case playlistSortDuration:
 		return "Duration"
-	case playlistSortDateAdded:
-		return "Date added"
 	}
 	return "Original order"
 }
@@ -57,8 +54,6 @@ func (s playlistSort) directionLabel() string {
 			return "Order"
 		case playlistSortDuration:
 			return "Longest first"
-		case playlistSortDateAdded:
-			return "Newest first"
 		}
 	}
 	switch s.field {
@@ -68,8 +63,6 @@ func (s playlistSort) directionLabel() string {
 		return "A–Z"
 	case playlistSortDuration:
 		return "Shortest first"
-	case playlistSortDateAdded:
-		return "Oldest first"
 	}
 	return "Order"
 }
@@ -123,10 +116,6 @@ func comparePlaylistItems(left, right youtube.MusicItem, field playlistSortField
 		order = strings.Compare(strings.ToLower(playlistArtist(left)), strings.ToLower(playlistArtist(right)))
 	case playlistSortDuration:
 		order = cmp.Compare(durationSeconds(left.Duration), durationSeconds(right.Duration))
-	case playlistSortDateAdded:
-		// InnerTube playlist browse responses do not expose a per-entry date.
-		// Keeping this comparison equal is deliberate: position is not a date.
-		return 0
 	}
 	if order != 0 {
 		return order

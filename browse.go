@@ -916,10 +916,8 @@ func (a *app) closePlaylistSearch() {
 	a.detailFilter = ""
 }
 
-// playlistSort draws the playlist ordering controls. The field menu and the
-// direction button are separate, so changing direction never changes the
-// selected field. Date added is shown as unavailable because playlist browse
-// responses do not carry a per-entry timestamp.
+// playlistSort draws separate field and direction controls, so changing
+// direction never changes the selected field.
 func (a *app) playlistSort(c *ui.Context) {
 	buttonLabel := "Sort"
 	if a.detailSort.field != playlistSortOriginal {
@@ -943,14 +941,10 @@ func (a *app) playlistSort(c *ui.Context) {
 				{playlistSortTitle, "Title"},
 				{playlistSortArtist, "Artist"},
 				{playlistSortDuration, "Duration"},
-				{playlistSortDateAdded, "Date added (unavailable)"},
 			}
 			for _, choice := range choices {
 				item := m3.MenuItem(c, choice.label, nil)
-				if choice.field == playlistSortDateAdded {
-					item.Disabled(true).TextColor(m3.Of(c).Scheme.OnSurfaceVariant)
-				}
-				if choice.field != playlistSortDateAdded && item.Clicked() {
+				if item.Clicked() {
 					a.detailSort.choose(choice.field)
 					a.detailSortOpen = false
 				}

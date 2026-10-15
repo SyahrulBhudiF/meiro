@@ -25,7 +25,6 @@ func TestSortPlaylistSections(t *testing.T) {
 		{"artist ascending", playlistSort{field: playlistSortArtist}, []string{"short", "duplicate", "long"}},
 		{"duration ascending", playlistSort{field: playlistSortDuration}, []string{"short", "duplicate", "long"}},
 		{"duration descending", playlistSort{field: playlistSortDuration, desc: true}, []string{"long", "short", "duplicate"}},
-		{"date added does not invent an order", playlistSort{field: playlistSortDateAdded}, []string{"long", "short", "duplicate"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -12,9 +12,7 @@ and this project adheres to
 
 - **Playlist sorting**: order playlist songs by title, artist, or duration in
   either direction. The selected order also controls Play, Shuffle, track
-  activation, and playlist search results. Date-added sorting is not offered
-  because the current YouTube Music response does not include per-entry dates;
-  playlist position is not used as a substitute.
+  activation, and playlist search results.
 - **Last.fm scrobbling.** Connect your account in Settings; Meiro then sends
   what is playing and scrobbles each track once you have listened to half of
   it, or four minutes. Pause scrobbling without disconnecting, and plays that
