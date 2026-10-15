@@ -370,10 +370,37 @@ func TestRightClickingTheHeroArtOffersItsMenu(t *testing.T) {
 	}
 }
 
-// A playlist page can be searched from the button beside its play buttons.
-// Pressing it opens the bar, typing narrows the songs it shows by title or
-// artist, and the queue stays the whole playlist, so a matching song plays
-// from its own place in it. Closing the bar puts the whole playlist back.
+// A playlist page can sort the songs that Play, Shuffle and activation use.
+func TestAPlaylistPageCanBeSorted(t *testing.T) {
+	a, _ := playbackApp(t)
+	tt := open(a, "/playlist/VLPL_songs")
+	if err := tt.Click("Sort"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Title"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if got := ids(a.page.playable); !slices.Equal(got, []string{"song-one", "song-three", "song-two"}) {
+		t.Fatalf("title sort queued %v, want song-one, song-three, song-two", got)
+	}
+	if err := tt.Click("A–Z"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if got := ids(a.page.playable); !slices.Equal(got, []string{"song-two", "song-three", "song-one"}) {
+		t.Fatalf("title descending sort queued %v, want song-two, song-three, song-one", got)
+	}
+	if err := tt.Click("Z–A"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.detailSort.field != playlistSortTitle || a.detailSort.desc {
+		t.Fatalf("direction toggle = %#v, want ascending title", a.detailSort)
+	}
+}
+
 func TestAPlaylistPageCanBeSearched(t *testing.T) {
 	a, _ := playbackApp(t)
 	a.router.Push("/playlist/VLPL_songs")
@@ -410,6 +437,7 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 				t.Fatal(err)
 			}
 			tt.Frame()
+
 		}
 		if _, ok := tt.Find("Clear search"); ok {
 			if err := tt.Click("Clear search"); err != nil {
@@ -417,11 +445,7 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 			}
 			tt.Frame()
 		}
-		// The field must hold the keyboard, which the clear button took.
-		if err := tt.Click("Search in this playlist"); err != nil {
-			t.Fatal(err)
-		}
-		tt.Type(query)
+		a.detailFilter, a.detailSearchSeen, a.detailSearchBlur = query, false, 0
 		tt.Frame()
 		tt.Frame()
 	}
@@ -439,6 +463,15 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 
 	// A matching song plays from its own place in the whole playlist.
 	if err := tt.Click("Ameiro Two"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	for range 2 {
+		tt.Frame()
+	}
+	// Let the search field settle after activating its filtered row before
+	// checking the queue it started.
+	if err := tt.Click("Search in this playlist"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()

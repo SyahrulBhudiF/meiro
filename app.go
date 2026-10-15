@@ -92,6 +92,10 @@ type app struct {
 	detailFilter     string
 	detailSearchOpen bool
 	detailFocus      bool
+	detailSearchSeen bool
+	detailSearchBlur uint8
+	detailSort       playlistSort
+	detailSortOpen   bool
 	menu             itemMenu
 
 	// Dialogs.
