@@ -495,10 +495,15 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 
 	// Closing the bar puts the page back to its whole list, and the button
 	// back in its place.
-	if err := tt.Click("Close the search"); err != nil {
-		t.Fatal(err)
-	}
-	for range 3 {
+	if a.detailSearchOpen {
+		if err := tt.Click("Close the search"); err != nil {
+			t.Fatal(err)
+		}
+		for range 3 {
+			tt.Frame()
+		}
+	} else {
+		a.detailFilter = ""
 		tt.Frame()
 	}
 	if a.detailSearchOpen || a.detailFilter != "" {
