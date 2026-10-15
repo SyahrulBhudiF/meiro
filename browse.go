@@ -796,6 +796,10 @@ func (a *app) hero(c *ui.Context) {
 			if d.subtitle != "" {
 				m3.Text(c, m3.BodyLarge, d.subtitle).MaxLines(2).TextColor(sc.OnSurfaceVariant)
 			}
+			if r.id == routePlaylist && a.detailSearchOpen {
+				ui.Box(c).Height(10)
+				ui.Row(c).Padding(0, 24).Children(func() { a.playlistSearch(c) })
+			}
 			ui.Box(c).Height(10)
 			ui.Row(c).Gap(8).Wrap().Children(func() {
 				none := len(a.page.playable) == 0
@@ -807,7 +811,7 @@ func (a *app) hero(c *ui.Context) {
 				}
 				a.libraryButton(c)
 				a.subscribeButton(c)
-				if r.id == routePlaylist {
+				if r.id == routePlaylist && !a.detailSearchOpen {
 					a.playlistSearch(c)
 				}
 			})
@@ -864,7 +868,7 @@ func (a *app) playlistSearch(c *ui.Context) {
 	sc := m3.Of(c).Scheme
 	// Animate the parent width so the search expands from its icon button
 	// without relying on Grow inside the shrink-wrapped action group.
-	control := ui.Row(c.Key("playlist-search")).Shrink(0)
+	control := ui.Row(c.Key("playlist-search")).MinWidth(0).Grow(1).Shrink(1)
 	target := float32(0)
 	if a.detailSearchOpen {
 		target = 1
@@ -889,14 +893,18 @@ func (a *app) playlistSearch(c *ui.Context) {
 		})
 		return
 	}
-	control.Width(detailSearchButton + (detailSearchWidth-detailSearchButton)*min(max(grown, 0), 1))
+	maxWidth := float32(detailSearchWidth)
+	if a.listWidth > 0 {
+		maxWidth = min(maxWidth, a.listWidth-48)
+	}
+	control.Width(detailSearchButton + (maxWidth-detailSearchButton)*min(max(grown, 0), 1))
 	control.Children(func() {
 		result := m3.SearchBar(c, m3.SearchSpec{
 			Value:       &a.detailFilter,
 			Placeholder: "Search in this playlist",
 			Key:         "playlist-search-bar",
 			AutoFocus:   a.detailFocus,
-			MaxWidth:    detailSearchWidth,
+			MaxWidth:    maxWidth,
 			Dismiss:     true,
 		})
 		if result.Dismissed {

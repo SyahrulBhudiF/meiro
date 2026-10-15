@@ -183,7 +183,7 @@ func buildRows(rows []row, playable []youtube.MusicItem, r *route, s *pageState,
 				hasTracks = hasTracks || item.IsTrack()
 			}
 		}
-		if hasTracks && key.filter == "" {
+		if hasTracks {
 			rows = append(rows, row{kind: rowHeading, title: "Songs", shelf: "playlist-sort-header", track: -1})
 		}
 	}
@@ -298,7 +298,8 @@ func buildRows(rows []row, playable []youtube.MusicItem, r *route, s *pageState,
 	case s.more != "" && r.id != routeSearch:
 		rows = append(rows, row{kind: rowMore, title: "Show more", track: -1})
 	}
-	if len(rows) == 0 || (len(rows) == 1 && rows[0].kind == rowHero) {
+	if len(rows) == 0 || (len(rows) == 1 && rows[0].kind == rowHero) ||
+		(searching && len(rows) == 2 && rows[0].kind == rowHero && rows[1].shelf == "playlist-sort-header") {
 		title, body := r.empty.title, r.empty.body
 		switch {
 		case r.id == routeSearch:

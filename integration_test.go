@@ -459,6 +459,12 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 	}
 
 	search("ameiro")
+	if !slices.ContainsFunc(a.page.rows, func(r row) bool { return r.shelf == "playlist-sort-header" }) {
+		t.Errorf("filtering hid the playlist sort header: %#v", a.page.rows)
+	}
+	if !tt.HasText("Sort: Original order") {
+		t.Errorf("filtering hid the Sort control: %q", tt.Texts())
+	}
 	if shown() != 2 {
 		t.Errorf("the search shows %d songs, want the 2 whose title matches", shown())
 	}
@@ -477,9 +483,9 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 	for range 2 {
 		tt.Frame()
 	}
-	// Let the search field settle after activating its filtered row before
-	// checking the queue it started.
-	if err := tt.Click("Search in this playlist"); err != nil {
+	// The search field loses focus when activating its filtered row; closing
+	// it verifies the playback path leaves the playlist page usable.
+	if err := tt.Click("Close the search"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
@@ -497,8 +503,11 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 	}
 
 	search("nothing here")
-	if shown() != 0 || !tt.HasText("No songs match “nothing here”") {
-		t.Errorf("a search that matches nothing says %q", tt.Texts())
+	if shown() != 0 {
+		t.Errorf("a search that matches nothing shows %d songs", shown())
+	}
+	if !slices.ContainsFunc(a.page.rows, func(r row) bool { return r.kind == rowEmpty && strings.Contains(r.title, "nothing here") }) {
+		t.Errorf("a search that matches nothing has no empty-state row: %#v", a.page.rows)
 	}
 
 	// Closing the bar puts the page back to its whole list, and the button
