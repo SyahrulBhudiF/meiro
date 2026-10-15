@@ -123,7 +123,7 @@ func (a *app) onNavigate() {
 	// A playlist page opens unfiltered, with its search closed: the search
 	// belongs to the visit, not the page. A page kept from before rebuilds
 	// its rows, since the search is part of the rows' key.
-	a.detailFilter, a.detailSearchOpen, a.detailFocus, a.detailSearchSeen, a.detailSearchBlur, a.detailSort, a.detailSortOpen = "", false, false, false, 0, playlistSort{}, false
+	a.detailFilter, a.detailSearchOpen, a.detailFocus, a.detailSearchHadFocus, a.detailSort, a.detailSortOpen = "", false, false, false, playlistSort{}, false
 	a.pageLoad.stop()
 	a.pageMore.stop()
 	a.nowPlaying.open, a.nowPlaying.closing = false, false

@@ -176,6 +176,17 @@ func buildRows(rows []row, playable []youtube.MusicItem, r *route, s *pageState,
 	if r.id == routePlaylist && key.sort.active() {
 		sections = sortPlaylistSections(sections, key.sort)
 	}
+	if r.id == routePlaylist {
+		hasTracks := false
+		for _, section := range sections {
+			for _, item := range section.Items {
+				hasTracks = hasTracks || item.IsTrack()
+			}
+		}
+		if hasTracks && key.filter == "" {
+			rows = append(rows, row{kind: rowHeading, title: "Songs", shelf: "playlist-sort-header", track: -1})
+		}
+	}
 	vertical := collection || r.id == routeSearch
 	// A playlist narrowed to a search shows only the songs that match, and
 	// the queue it gathers is still the whole playlist: playing a match

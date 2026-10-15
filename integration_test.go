@@ -374,25 +374,33 @@ func TestRightClickingTheHeroArtOffersItsMenu(t *testing.T) {
 func TestAPlaylistPageCanBeSorted(t *testing.T) {
 	a, _ := playbackApp(t)
 	tt := open(a, "/playlist/VLPL_songs")
-	if err := tt.Click("Sort"); err != nil {
+	if err := tt.Click("Sort: Original order"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
-	if err := tt.Click("Title"); err != nil {
+	if err := tt.Click("Title, A–Z"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
 	if got := ids(a.page.playable); !slices.Equal(got, []string{"song-one", "song-three", "song-two"}) {
 		t.Fatalf("title sort queued %v, want song-one, song-three, song-two", got)
 	}
-	if err := tt.Click("A–Z"); err != nil {
+	if err := tt.Click("Sort: Title · A–Z"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Sort descending"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
 	if got := ids(a.page.playable); !slices.Equal(got, []string{"song-two", "song-three", "song-one"}) {
 		t.Fatalf("title descending sort queued %v, want song-two, song-three, song-one", got)
 	}
-	if err := tt.Click("Z–A"); err != nil {
+	if err := tt.Click("Sort: Title · Z–A"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Sort ascending"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Frame()
@@ -445,7 +453,7 @@ func TestAPlaylistPageCanBeSearched(t *testing.T) {
 			}
 			tt.Frame()
 		}
-		a.detailFilter, a.detailSearchSeen, a.detailSearchBlur = query, false, 0
+		a.detailFilter, a.detailSearchHadFocus = query, false
 		tt.Frame()
 		tt.Frame()
 	}

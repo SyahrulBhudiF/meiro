@@ -43,28 +43,21 @@ func (s playlistSort) label() string {
 }
 
 func (s playlistSort) directionLabel() string {
-	if !s.active() {
-		return "Order"
-	}
-	if s.desc {
-		switch s.field {
-		case playlistSortTitle, playlistSortArtist:
-			return "Z–A"
-		case playlistSortOriginal:
-			return "Order"
-		case playlistSortDuration:
-			return "Longest first"
-		}
-	}
 	switch s.field {
-	case playlistSortOriginal:
-		return "Order"
 	case playlistSortTitle, playlistSortArtist:
+		if s.desc {
+			return "Z–A"
+		}
 		return "A–Z"
 	case playlistSortDuration:
+		if s.desc {
+			return "Longest first"
+		}
 		return "Shortest first"
+	case playlistSortOriginal:
+		return "Original order"
 	}
-	return "Order"
+	return "Original order"
 }
 
 func (s *playlistSort) choose(field playlistSortField) {
@@ -79,30 +72,38 @@ func (s *playlistSort) choose(field playlistSortField) {
 	s.desc = !s.desc
 }
 
-// sortPlaylistSections returns the playlist tracks in one stable order. The
-// original slice is never modified, and equal or missing values retain their
-// YouTube order. This also keeps duplicate playlist entries distinct.
+// sortPlaylistSections sorts track slots independently within each section.
+// Section metadata and non-track items stay where YouTube placed them.
 func sortPlaylistSections(sections []youtube.MusicSection, s playlistSort) []youtube.MusicSection {
 	if !s.active() {
 		return sections
 	}
-	tracks := make([]youtube.MusicItem, 0)
-	for _, section := range sections {
+	sorted := make([]youtube.MusicSection, len(sections))
+	for i, section := range sections {
+		sorted[i] = section
+		sorted[i].Items = append([]youtube.MusicItem(nil), section.Items...)
+		tracks := make([]youtube.MusicItem, 0, len(section.Items))
 		for _, item := range section.Items {
 			if item.IsTrack() {
 				tracks = append(tracks, item)
 			}
 		}
-	}
-	sort.SliceStable(tracks, func(i, j int) bool {
-		left, right := tracks[i], tracks[j]
-		order := comparePlaylistItems(left, right, s.field)
-		if s.desc {
-			return order > 0
+		sort.SliceStable(tracks, func(i, j int) bool {
+			order := comparePlaylistItems(tracks[i], tracks[j], s.field)
+			if s.desc {
+				return order > 0
+			}
+			return order < 0
+		})
+		track := 0
+		for j, item := range sorted[i].Items {
+			if item.IsTrack() {
+				sorted[i].Items[j] = tracks[track]
+				track++
+			}
 		}
-		return order < 0
-	})
-	return []youtube.MusicSection{{Items: tracks}}
+	}
+	return sorted
 }
 
 func comparePlaylistItems(left, right youtube.MusicItem, field playlistSortField) int {

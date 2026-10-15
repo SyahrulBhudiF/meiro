@@ -73,7 +73,14 @@ func (a *app) rowView(c *ui.Context, rows []row, i int) {
 		a.topResult(c, r.item)
 	case rowHeading:
 		next := i+1 < len(rows) && (rows[i+1].kind == rowCards || rows[i+1].kind == rowColumns)
-		a.sectionHeading(c, r, next, i == 0)
+		if r.shelf == "playlist-sort-header" {
+			ui.Row(c).Padding(8, 16).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, r.title).Grow(1)
+				a.playlistSort(c)
+			})
+		} else {
+			a.sectionHeading(c, r, next, i == 0)
+		}
 	case rowCards:
 		a.cardShelf(c, r)
 	case rowColumns:
@@ -801,7 +808,6 @@ func (a *app) hero(c *ui.Context) {
 				a.libraryButton(c)
 				a.subscribeButton(c)
 				if r.id == routePlaylist {
-					a.playlistSort(c)
 					a.playlistSearch(c)
 				}
 			})
@@ -846,7 +852,7 @@ func (a *app) heroMenu(c *ui.Context, anchor ui.Element) {
 // the size of a touch target, and the bar it opens reaches at most this wide.
 const (
 	detailSearchButton = 56
-	detailSearchWidth  = 360
+	detailSearchWidth  = 520
 )
 
 // playlistSearch draws the control that narrows a playlist page to the songs
@@ -878,7 +884,7 @@ func (a *app) playlistSearch(c *ui.Context) {
 				button.Hovered(), button.Pressed(), button.FocusVisible()))
 			if button.Clicked() {
 				a.detailSearchOpen, a.detailFocus = true, true
-				a.detailSearchSeen, a.detailSearchBlur = false, 0
+				a.detailSearchHadFocus = false
 			}
 		})
 		return
@@ -895,13 +901,11 @@ func (a *app) playlistSearch(c *ui.Context) {
 		})
 		if result.Dismissed {
 			a.closePlaylistSearch()
-		} else if result.Changed || result.Focused {
-			a.detailSearchSeen, a.detailSearchBlur = true, 0
-		} else if a.detailSearchSeen && a.detailFilter == "" {
-			a.detailSearchBlur++
-			if a.detailSearchBlur >= 2 {
+		} else {
+			if a.detailSearchHadFocus && !result.Focused && a.detailFilter == "" {
 				a.closePlaylistSearch()
 			}
+			a.detailSearchHadFocus = result.Focused
 		}
 	})
 	// The bar has taken the keyboard, or the frame it would have was not the
@@ -912,22 +916,21 @@ func (a *app) playlistSearch(c *ui.Context) {
 // closePlaylistSearch puts a playlist page back to its whole list, and the
 // control back to the button that opens the search.
 func (a *app) closePlaylistSearch() {
-	a.detailSearchOpen, a.detailFocus, a.detailSearchSeen, a.detailSearchBlur = false, false, false, 0
+	a.detailSearchOpen, a.detailFocus, a.detailSearchHadFocus = false, false, false
 	a.detailFilter = ""
 }
 
-// playlistSort draws separate field and direction controls, so changing
-// direction never changes the selected field.
+// playlistSort draws one compact field-and-direction control above the list.
 func (a *app) playlistSort(c *ui.Context) {
-	buttonLabel := "Sort"
-	if a.detailSort.field != playlistSortOriginal {
-		buttonLabel += ": " + a.detailSort.label()
+	label := "Sort: " + a.detailSort.label()
+	if a.detailSort.active() {
+		label += " · " + a.detailSort.directionLabel()
 	}
 	rotation := float32(0)
 	if a.detailSortOpen {
 		rotation = 180
 	}
-	anchor := m3.Button(c, m3.ButtonSpec{Label: buttonLabel, Icon: m3.IconExpandMore, IconRotation: rotation, Kind: m3.Tonal, Size: m3.Medium56, Key: "playlist-sort"})
+	anchor := m3.Button(c, m3.ButtonSpec{Label: label, Icon: m3.IconExpandMore, IconRotation: rotation, Kind: m3.Outlined, Size: m3.Medium56, Key: "playlist-sort"})
 	if anchor.Clicked() {
 		a.detailSortOpen = true
 	}
@@ -938,9 +941,9 @@ func (a *app) playlistSort(c *ui.Context) {
 				label string
 			}{
 				{playlistSortOriginal, "Original order"},
-				{playlistSortTitle, "Title"},
-				{playlistSortArtist, "Artist"},
-				{playlistSortDuration, "Duration"},
+				{playlistSortTitle, "Title, A–Z"},
+				{playlistSortArtist, "Artist, A–Z"},
+				{playlistSortDuration, "Duration, shortest first"},
 			}
 			for _, choice := range choices {
 				item := m3.MenuItem(c, choice.label, nil)
@@ -949,14 +952,17 @@ func (a *app) playlistSort(c *ui.Context) {
 					a.detailSortOpen = false
 				}
 			}
+			if a.detailSort.active() {
+				label := "Sort descending"
+				if a.detailSort.desc {
+					label = "Sort ascending"
+				}
+				if m3.MenuItem(c, label, nil).Clicked() {
+					a.detailSort.desc = !a.detailSort.desc
+					a.detailSortOpen = false
+				}
+			}
 		})
-	}
-	directionRotation := float32(0)
-	if a.detailSort.desc {
-		directionRotation = 180
-	}
-	if m3.Button(c, m3.ButtonSpec{Label: a.detailSort.directionLabel(), Icon: m3.IconArrowDown, IconRotation: directionRotation, Kind: m3.Outlined, Size: m3.Medium56, Disabled: !a.detailSort.active(), Key: "playlist-sort-direction"}).Clicked() {
-		a.detailSort.desc = !a.detailSort.desc
 	}
 }
 
