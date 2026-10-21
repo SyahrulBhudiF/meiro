@@ -8,6 +8,12 @@ and this project adheres to
 
 ## [Unreleased]
 
+### Changed
+
+- **Scrollbars match the active theme.** Their slimmer, primary-colour thumb
+  is consistent across pages, and carousel shelves leave more room below the
+  bar before the next section.
+
 ## [0.4.3] - 2026-10-20
 
 ### Added
