@@ -54,7 +54,7 @@ var settingsRows = []settingsRow{
 	{key: "lastfm", search: "last.fm scrobbling music service", card: (*app).lastFMCard},
 
 	{key: "h-look", heading: "Appearance and sound"},
-	{key: "appearance", search: "theme appearance colors dark light", card: (*app).appearanceCard},
+	{key: "appearance", search: "theme appearance system light dark colour color colours colors violet indigo blue sky teal green lime amber orange red rose orchid hue palette tonal spot vibrant expressive neutral monochrome artwork dynamic", card: (*app).appearanceCard},
 	{key: "sound", search: "sound audio normalize loudness equaliser volume", card: (*app).soundCard},
 
 	{key: "h-system", heading: "System"},

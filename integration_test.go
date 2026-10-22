@@ -155,6 +155,31 @@ func TestSettingsSearchFiltersSettingsInPlace(t *testing.T) {
 	if tt.HasText("Normalize loudness") {
 		t.Errorf("searching Discord left unrelated sound settings visible: %q", tt.Texts())
 	}
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{query: "colour", want: "Colour"},
+		{query: "color", want: "Colour"},
+		{query: "palette", want: "Palette"},
+		{query: "hue", want: "Hue"},
+		{query: "artwork", want: "Colour from artwork"},
+	} {
+		if err := tt.Click("Clear search"); err != nil {
+			t.Fatal(err)
+		}
+		if err := tt.Click("Search settings"); err != nil {
+			t.Fatal(err)
+		}
+		tt.Type(tc.query)
+		tt.Frame()
+		if !tt.HasText(tc.want) {
+			t.Errorf("searching %q did not show %q: %q", tc.query, tc.want, tt.Texts())
+		}
+		if tt.HasText("Discord Rich Presence") {
+			t.Errorf("searching %q left the unrelated Discord setting visible: %q", tc.query, tt.Texts())
+		}
+	}
 
 	tt.Type(" unmatched")
 	tt.Frame()
