@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Palette options have a uniform size, and hover outlines no longer shift their contents.** Colour swatches also keep their contents in place when hovered.
+
 ### Added
 
 - **Search Settings.** A playlist-style search button filters settings in place, including the Discord Rich Presence option.
@@ -23,10 +27,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **A volume slider in the tray mini player.** Adjust or mute playback volume directly from the tray flyout.
 - **Media buttons on the Windows taskbar thumbnail.** Hover over Meiro in the taskbar for Previous, Play or Pause, and Next, the way Spotify offers them, without bringing the window back. They follow the taskbar's light or dark theme and come back after Explorer restarts.
 
 ### Fixed
 
+- **The player's side panel does not crowd controls in short windows.** When the
+  window is wide but short, the queue and lyrics panel stays as an overlay behind
+  its toggle instead of splitting side-by-side and squeezing the album artwork.
 - **The tab of the page already showing puts the player away.** With the player
   open, the page's own tab in the rail did nothing, so the only way back to the
   page was the player's close button. The tab now closes the player and leaves
