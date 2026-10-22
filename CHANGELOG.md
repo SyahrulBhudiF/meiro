@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Search Settings.** A playlist-style search button filters settings in place, including the Discord Rich Presence option.
+
 ### Fixed
 
 - **Keyboard navigation keeps focus on the control you choose.** Tab and Shift+Tab reach row and card menus without losing focus. Menus support arrow keys, Home, End and Escape, and return focus when closed. Shift+F10 opens an item's menu, the player tabs support arrow keys, and Enter plays the selected queue track.
