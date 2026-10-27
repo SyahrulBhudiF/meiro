@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adding a song a playlist already holds says so.** The picker used to keep itself open over YouTube's raw failed status. It now closes and tells you the song is already in that playlist.
+
 ## [0.4.11] - 2026-10-27
 
 ### Added

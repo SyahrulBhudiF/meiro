@@ -3,6 +3,7 @@ package youtube
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +21,33 @@ func (p playlistResponse) RoundTrip(request *http.Request) (*http.Response, erro
 		Body:       io.NopCloser(strings.NewReader(string(p))),
 		Request:    request,
 	}, nil
+}
+
+// duplicatePlaylistResponse is what YouTube answers an add with when the
+// playlist holds the video already: a failed write that offers to add the
+// video anyway.
+const duplicatePlaylistResponse = `{"status":"STATUS_FAILED","actions":[{"addToToastAction":{"item":{"notificationActionRenderer":{"actionButton":{"buttonRenderer":{"command":{"playlistEditEndpoint":{"playlistId":"PL1","actions":[{"action":"ACTION_ADD_VIDEO","addedVideoId":"vid-1","dedupeOption":"DEDUPE_OPTION_SKIP"}]}}}}}}}}]}`
+
+func TestAddToPlaylistTellsADuplicateFromARefusal(t *testing.T) {
+	auth, err := NewCookieAuth("SAPISID=test", CookieOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(reply string) error {
+		client := NewClient(Options{
+			CookieAuth: auth,
+			HTTPClient: &http.Client{Transport: playlistResponse(reply)},
+		})
+		return client.AddToPlaylist(context.Background(), "VLPL1", "vid-1")
+	}
+	if err := add(duplicatePlaylistResponse); !errors.Is(err, ErrAlreadyInPlaylist) {
+		t.Fatalf("a song the playlist holds already = %v", err)
+	}
+	// A refusal that offers no retry is not a duplicate, and is still a
+	// failure the app shows.
+	if err := add(`{"status":"STATUS_FAILED"}`); err == nil || errors.Is(err, ErrAlreadyInPlaylist) {
+		t.Fatalf("a plain refusal = %v", err)
+	}
 }
 
 func TestRemoveFromPlaylistSendsOccurrenceID(t *testing.T) {

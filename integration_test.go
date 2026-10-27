@@ -1390,6 +1390,41 @@ func TestAddingASongToAPlaylist(t *testing.T) {
 	}
 }
 
+func TestAddingASongAlreadyInAPlaylist(t *testing.T) {
+	resetFakes()
+	t.Cleanup(resetFakes)
+	duplicateWrites.Store(true)
+	a := signedInApp(t)
+	tt := ui.NewTester(a.view, 1180, 850)
+	card, ok := tt.Find("Ambient One")
+	if !ok {
+		t.Fatalf("the home page has no song: %q", tt.Texts())
+	}
+	tt.Move(card.X+card.W/2, card.Y+card.H/2)
+	tt.Frame()
+	if err := tt.Click("More options for Ambient One"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Add to playlist"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if err := tt.Click("Add to Hype"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if write := written(); !strings.HasSuffix(write.endpoint, "/browse/edit_playlist") || write.body["playlistId"] != "PLhype" {
+		t.Fatalf("write = %#v", write)
+	}
+	if a.addToPlaylist != nil {
+		t.Errorf("the picker stayed open over a song the playlist holds already")
+	}
+	if !tt.HasText("“Ambient One” is already in “Hype”") {
+		t.Errorf("the duplicate was not announced: %q", tt.Texts())
+	}
+}
+
 func TestSessionRestoreAndSignOut(t *testing.T) {
 	a := newTestApp(t)
 	store := &memoryStore{cookie: "SAPISID=fresh"}

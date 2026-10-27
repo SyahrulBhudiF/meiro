@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -403,6 +404,13 @@ func (a *app) choosePlaylist(playlist youtube.MusicItem) {
 		d.busy = false
 		open := a.addToPlaylist == d
 		switch {
+		case errors.Is(err, youtube.ErrAlreadyInPlaylist):
+			// The playlist holds the song already, so nothing was written and
+			// nothing went wrong.
+			if open {
+				a.dismissAddToPlaylist()
+			}
+			a.notice = "“" + item.Title + "” is already in “" + playlist.Title + "”"
 		case err != nil && open:
 			d.err = err.Error()
 		case err != nil:
