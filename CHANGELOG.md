@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **Choosing a search suggestion from another page opens the search.** Clicking a suggested query used to run the search without leaving the page, so it looked like nothing happened until you opened Search. It now shows the search page with the results, as pressing Enter does.
+
 ## [0.4.11] - 2026-10-27
 
 ### Added

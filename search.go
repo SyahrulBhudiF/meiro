@@ -224,7 +224,9 @@ func (a *app) suggestionRow(c *ui.Context, query string) {
 		m3.Text(c, m3.BodyLarge, query).Grow(1).MinWidth(0).SingleLine().TextColor(sc.OnSurface)
 	})
 	if row.Clicked() {
-		a.runSearch(query, "")
+		// The panel hangs under the field every page searches from, so a
+		// query chosen from it shows the search page wherever it was typed.
+		a.runSearchFrom(query)
 	}
 }
 

@@ -802,6 +802,37 @@ func TestSearchingFromAnotherPage(t *testing.T) {
 	}
 }
 
+// A suggested query is chosen to see what it searches, from whichever page the
+// field was typed in: choosing one shows the search page, as Enter does.
+func TestChoosingASuggestionFromAnotherPageShowsTheSearch(t *testing.T) {
+	a := newTestApp(t)
+	a.router.Push("/explore")
+	tt := ui.NewTester(a.view, 1000, 700)
+	searches.Store(0)
+
+	if err := tt.Click(searchPlaceholder); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("yor")
+	tt.Frame()
+	if !tt.HasText("Yorushika songs") {
+		t.Fatalf("suggestions are missing: %q", tt.Texts())
+	}
+	if err := tt.Click("Yorushika songs"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if r, _ := a.route(); r.id != routeSearch {
+		t.Fatalf("choosing a suggestion left the app on %q", a.path())
+	}
+	if !tt.HasText("Search Result Song") || searches.Load() != 1 {
+		t.Fatalf("the search did not run: %q", tt.Texts())
+	}
+	if a.search.query != "Yorushika songs" {
+		t.Errorf("the field reads %q", a.search.query)
+	}
+}
+
 // An episode top result exposes Play and resolves the video ID carried by its
 // episode-page browse ID.
 func TestSearchEpisodeTopResultPlays(t *testing.T) {

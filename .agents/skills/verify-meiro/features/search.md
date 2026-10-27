@@ -28,6 +28,7 @@ Preconditions:
 
 - **Suggest.** `p.click(searchPlaceholder, "focus")`, `tt.Type("yor")`, `p.step("typed")`. `Yorushika songs` shows and `searches.Load()` is `0`.
 - **Run.** `p.click("Yorushika songs", "results")`. `Search Result Song` shows, `searches.Load()` is `1`, and `a.settings.Recent[0]` is `Yorushika songs`.
+- **Run from another page.** The panel hangs under the field every page searches from, so a suggestion chosen from `/explore` shows the search page too, as Enter does (`TestChoosingASuggestionFromAnotherPageShowsTheSearch`).
 - **Filter.** Verified. `p.click("Songs", "songs-only")`. `searchBody()` contains `"params"`. `p.click("Clear filters", "cleared")`.
 - **Next page.** Mirror `TestSearchLoadsTheNextPageItself`. `searchesMore.Load()` becomes `1` with no click.
 - **Menu.** `tt.RightClick("Suggested Song")` and `tt.Menu()` lists the item actions.
@@ -36,6 +37,7 @@ Preconditions:
 ## Gotchas
 
 - Typing alone must not run a search. Assert the counter before Enter or a click.
+- A screenshot taken right after a navigation shows the page at the start of its 250 ms slide, painted off the window, because the tester's clock stands still. Call `tt.Advance(400 * time.Millisecond)` before `p.step`.
 - Settings has a separate `Search settings` button that expands into a local filter; it does not navigate to music search. Stats has no search entry point.
 - `searchBody()` is the last request body. Read it right after the action.
 - Results for an older query must not replace newer ones. Cover it with two queries in a row when you change the search task.
