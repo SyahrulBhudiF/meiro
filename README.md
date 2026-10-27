@@ -118,6 +118,27 @@ half of the title.
 - **Updates itself.** Meiro checks for new versions once a day. You can turn
   this off.
 
+## Non-goals
+
+Meiro stays small on purpose. These things stay out of scope and will not be
+implemented. If you open a pull request that adds one of them, I will not
+accept it. Feel free to maintain a fork of your own if you want to add these
+features.
+
+- **Video.** Music videos play as audio, with a badge on the artwork. Meiro
+  shows no picture.
+- **Local files.** Meiro plays what YouTube Music has. It does not import your
+  own audio files.
+- **Uploads.** Meiro does not upload music to YouTube Music or manage an
+  upload library.
+- **Casting.** Meiro plays on the computer it runs on. It does not send the
+  music to a TV, a speaker or another device.
+- **Other services.** Meiro plays YouTube Music only. It does not play from
+  Spotify, Apple Music or another service.
+- **Social features.** Meiro changes only your own library: likes, saved
+  albums, follows and your own playlists. It does not comment, share a library
+  or collaborate on a playlist.
+
 <p align="center">
   <a href="docs/screenshots/lyrics.png"><img src="docs/screenshots/lyrics.png" alt="Full player with synced lyrics, the sung line lit in the middle" width="720"></a>
 </p>

@@ -45,6 +45,9 @@ var (
 	// subscribeWrites counts the subscription writes, refused the same way.
 	subscribeWrites atomic.Int32
 	refuseWrites    atomic.Bool
+	// duplicateWrites makes the fake answer an add to a playlist the way
+	// YouTube answers one for a song the playlist holds already.
+	duplicateWrites atomic.Bool
 	fakeLikeState   atomic.Value // what /next says of vid-3, as a string; "" says nothing
 	// lastWrite is the last playlist write the fake YouTube was asked for:
 	// which endpoint, and the fields of its body.
@@ -141,6 +144,9 @@ func (fakeMusic) RoundTrip(request *http.Request) (*http.Response, error) {
 	case strings.HasSuffix(request.URL.Path, "/browse/edit_playlist"):
 		recordWrite(request.URL.Path, asked)
 		reply = editPlaylistResponse
+		if duplicateWrites.Load() && strings.Contains(asked, "ACTION_ADD_VIDEO") {
+			reply = duplicatePlaylistResponse(asked)
+		}
 	case strings.Contains(asked, "search-more"):
 		searchesMore.Add(1)
 		reply = searchMoreResponse
@@ -377,6 +383,7 @@ func resetFakes() {
 	subscribeWrites.Store(0)
 	homeMoreRequests.Store(0)
 	refuseWrites.Store(false)
+	duplicateWrites.Store(false)
 	fakeLikeState.Store("")
 	fakeLibrary.Clear()
 	fakeLibrary.Store("PLhype", true)
@@ -645,6 +652,21 @@ const createPlaylistResponse = `{"playlistId":"PLnew"}`
 
 // editPlaylistResponse is what YouTube answers an edit it made.
 const editPlaylistResponse = `{"status":"STATUS_SUCCEEDED"}`
+
+// duplicatePlaylistResponse is what YouTube answers an add with when the
+// playlist holds the video already: a failed write that offers to add the
+// video anyway.
+func duplicatePlaylistResponse(asked string) string {
+	var body struct {
+		Actions []struct {
+			AddedVideoID string `json:"addedVideoId"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal([]byte(asked), &body); err != nil || len(body.Actions) == 0 {
+		return editPlaylistResponse
+	}
+	return `{"status":"STATUS_FAILED","actions":[{"addToToastAction":{"item":{"notificationActionRenderer":{"actionButton":{"buttonRenderer":{"command":{"playlistEditEndpoint":{"actions":[{"action":"ACTION_ADD_VIDEO","addedVideoId":"` + body.Actions[0].AddedVideoID + `","dedupeOption":"DEDUPE_OPTION_SKIP"}]}}}}}}}}]}`
+}
 
 // recordWrite remembers the body of a playlist write, so a test can say what
 // the app asked YouTube to do.

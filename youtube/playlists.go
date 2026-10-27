@@ -55,6 +55,12 @@ func (c *Client) CreatePlaylist(ctx context.Context, title string, videos ...str
 	return response.PlaylistID, nil
 }
 
+// ErrAlreadyInPlaylist is the refusal YouTube answers an add with when the
+// playlist holds the video already. Nothing was written, and nothing is wrong:
+// YouTube offers to add the video anyway instead of making the write, so the
+// app can say the song is already there.
+var ErrAlreadyInPlaylist = errors.New("youtube: the video is already in the playlist")
+
 // AddToPlaylist adds one video to a playlist. playlistID is taken with or
 // without the "VL" prefix a browse ID carries, because a write wants it
 // without: reads add that prefix, writes take it off.
@@ -94,12 +100,33 @@ func (c *Client) AddToPlaylist(ctx context.Context, playlistID, videoID string) 
 		// read, and the app shows a line of it. The whole answer goes to the
 		// log, which is where a refusal can be read in full.
 		log.Printf("playlist: add refused playlist_id=%s video_id=%s status=%q body=%s", playlistID, videoID, response.Status, raw)
+		if alreadyInPlaylist(raw, videoID) {
+			return ErrAlreadyInPlaylist
+		}
 		if response.Status != "" {
 			return fmt.Errorf("youtube: the playlist refused the video (%s)", response.Status)
 		}
 		return refusedWrite("browse/edit_playlist", raw)
 	}
 	return nil
+}
+
+// alreadyInPlaylist reports a refusal that says the playlist holds the video
+// already. YouTube answers that one with an offer to add the video anyway, and
+// the offer is what is read: the notice beside it is translated, its dedupe
+// option is not.
+func alreadyInPlaylist(raw json.RawMessage, videoID string) bool {
+	retry := findRenderer(decodeResponse(raw), "playlistEditEndpoint")
+	actions, _ := retry.get("actions").([]any)
+	for _, value := range actions {
+		action, _ := value.(*jsonObject)
+		added, _ := action.get("addedVideoId").(string)
+		option, _ := action.get("dedupeOption").(string)
+		if added == videoID && option == "DEDUPE_OPTION_SKIP" {
+			return true
+		}
+	}
+	return false
 }
 
 // DeletePlaylist deletes a playlist of the account. The write takes the ID

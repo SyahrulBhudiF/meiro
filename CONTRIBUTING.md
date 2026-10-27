@@ -16,7 +16,9 @@ problem for a maintainer to investigate.
 - **Considering a large change or a change to user-facing behavior?** Open or
   comment on an issue first. This helps avoid duplicate work and gives the
   maintainer a chance to flag constraints before you spend time on the change.
-  You do not need approval before fixing a clear, contained bug.
+  Check the [non-goals](README.md#non-goals) in the README: a pull request that
+  adds one of them is closed. You do not need approval before fixing a clear,
+  contained bug.
 
 When possible, comment on an issue before starting substantial work so others
 know it is being handled. If someone else is already working on it, coordinate
