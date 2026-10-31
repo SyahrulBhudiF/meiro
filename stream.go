@@ -373,6 +373,8 @@ func (a *app) warmNext() {
 	if !ok {
 		return
 	}
+	// In repeat-track mode following is the current track, whose audio is
+	// already playing; do not resolve it again.
 	if next.VideoID == "" || next.VideoID == a.current.VideoID || a.isDownloaded(next.VideoID) {
 		return
 	}

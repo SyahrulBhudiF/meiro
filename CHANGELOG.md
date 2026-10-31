@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Playback explains when auto-skip reaches only disliked songs.** The player now tells you why it stopped instead of ending silently.
 - **Windows track notifications show the song's cover.** They showed Meiro's tray icon instead of the song's artwork.
 
 ### Removed

@@ -55,15 +55,11 @@ func (c *Client) RateTrack(ctx context.Context, videoID string, status LikeStatu
 	case Indifferent:
 		endpoint = "like/removelike"
 	case LikeUnknown:
-		return errors.New("youtube: RateTrack needs a known rating")
-	default:
+	}
+	if endpoint == "" {
 		return errors.New("youtube: RateTrack needs a known rating")
 	}
-	raw, err := c.execute(ctx, endpoint, map[string]any{"target": map[string]any{"videoId": videoID}})
-	if err != nil {
-		return err
-	}
-	return writeFailure(endpoint, raw)
+	return c.rateEndpoint(ctx, map[string]any{"videoId": videoID}, endpoint)
 }
 
 // rate likes or un-likes whatever target names: a video, or a playlist or an
@@ -73,6 +69,11 @@ func (c *Client) rate(ctx context.Context, target map[string]any, like bool) err
 	if like {
 		endpoint = "like/like"
 	}
+	return c.rateEndpoint(ctx, target, endpoint)
+}
+
+// rateEndpoint sends a like write and reports refusals from YouTube's body.
+func (c *Client) rateEndpoint(ctx context.Context, target map[string]any, endpoint string) error {
 	raw, err := c.execute(ctx, endpoint, map[string]any{"target": target})
 	if err != nil {
 		return err

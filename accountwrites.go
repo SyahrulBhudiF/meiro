@@ -77,16 +77,16 @@ func (a *app) toggleRating(item youtube.MusicItem, rating youtube.LikeStatus) {
 			return
 		}
 		a.setLike(id, before, false)
-		verb := "like"
-		if rating == youtube.Disliked {
+		var verb string
+		switch [2]youtube.LikeStatus{rating, after} {
+		case [2]youtube.LikeStatus{youtube.Liked, youtube.Indifferent}:
+			verb = "unlike"
+		case [2]youtube.LikeStatus{youtube.Disliked, youtube.Indifferent}:
+			verb = "remove dislike from"
+		case [2]youtube.LikeStatus{youtube.Liked, youtube.Liked}:
+			verb = "like"
+		case [2]youtube.LikeStatus{youtube.Disliked, youtube.Disliked}:
 			verb = "dislike"
-		}
-		if after == youtube.Indifferent {
-			if rating == youtube.Disliked {
-				verb = "remove dislike from"
-			} else {
-				verb = "unlike"
-			}
 		}
 		a.notice = "Could not " + verb + " “" + item.Title + "”: " + firstLine(err.Error())
 	})
@@ -174,7 +174,7 @@ func (a *app) dislikeButton(c *ui.Context) {
 		label = "Remove dislike from " + a.current.Title
 	}
 	if m3.IconButton(c, m3.IconButtonSpec{
-		Icon: m3.IconThumbDown, Label: label, Key: "dislike", Kind: m3.TonalIcon, Toggle: true, Selected: disliked,
+		Icon: m3.IconThumbDown, Label: label, Key: "dislike", Toggle: true, Selected: disliked,
 	}).Clicked() {
 		a.toggleRating(a.current, youtube.Disliked)
 	}

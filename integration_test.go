@@ -1958,6 +1958,36 @@ func TestGoingBackRestoresWhereAPageWasScrolled(t *testing.T) {
 	}
 }
 
+func TestPlaybackSettingIsReachableByScrollingOnASmallWindow(t *testing.T) {
+	a := newTestApp(t)
+	a.router.Push("/settings")
+	tt := ui.NewTester(a.view, 800, 450)
+	tt.Frame()
+	if tt.HasText("Skip disliked songs") {
+		t.Fatal("the Playback setting started in view; this does not prove small-window scrolling")
+	}
+
+	first, last := a.list.Visible()
+	for range 12 {
+		if last >= 7 {
+			break
+		}
+		tt.Scroll(500, 300, 0, 180)
+		tt.Frame()
+		first, last = a.list.Visible()
+	}
+	switchControl, ok := tt.Find("Skip disliked songs")
+	if !ok || last < 7 || switchControl.Y < 0 || switchControl.Y+switchControl.H > 450 {
+		t.Fatalf("Playback setting did not scroll into the small window: visible=%d..%d found=%t bounds=%+v texts=%q", first, last, ok, switchControl, tt.Texts())
+	}
+	if err := tt.Click("Skip disliked songs"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.settings.AutoSkipDisliked {
+		t.Fatal("the Playback setting could not be changed after scrolling to it")
+	}
+}
+
 // holdsPlaylist says whether the page's feed still lists the playlist with
 // this ID.
 func holdsPlaylist(a *app, id string) bool {

@@ -483,6 +483,10 @@ func (a *app) advance() {
 	if a.settings.AutoSkipDisliked && a.queue.remaining() > 0 &&
 		(!a.settings.AutoPlay || a.upNext.fetched && a.upNext.token == "" && !a.upNext.load.busy()) {
 		a.upNext.waiting = false
+		limit := a.queue.limit(a.settings.AutoPlay)
+		if a.queue.index < limit && (a.queue.index+1 < limit || a.repeat == repeatQueue) {
+			a.notice = "Playback stopped because every remaining track is disliked"
+		}
 		a.stopAtQueueEnd()
 		return
 	}

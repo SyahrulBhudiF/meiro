@@ -408,7 +408,7 @@ func (a *app) soundCard(c *ui.Context) {
 }
 
 func (a *app) playbackCard(c *ui.Context) {
-	a.settingsCard(c, "Playback", m3.IconMusicNote, func() {
+	a.settingsCard(c, "Disliked songs", m3.IconMusicNote, func() {
 		ui.Row(c).Gap(16).AlignItems(ui.Center).Children(func() {
 			settingLabel(c, "Auto-skip disliked songs", "Only songs known to be disliked are skipped.").Grow(1)
 			on := a.settings.AutoSkipDisliked

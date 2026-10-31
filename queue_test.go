@@ -356,6 +356,7 @@ func TestQueueNextEligible(t *testing.T) {
 		{name: "disliked play next", likes: []youtube.LikeStatus{youtube.Liked, youtube.Liked, youtube.Disliked}, playNext: "c", recStart: -1, skip: true, want: 1, ok: true},
 		{name: "repeat wraps", likes: []youtube.LikeStatus{youtube.Liked, youtube.Disliked, youtube.Disliked}, index: 1, recStart: -1, repeat: repeatQueue, skip: true, want: 0, ok: true},
 		{name: "all disliked", likes: []youtube.LikeStatus{youtube.Disliked, youtube.Disliked}, recStart: -1, repeat: repeatQueue, skip: true},
+		{name: "all disliked recommendations", likes: []youtube.LikeStatus{youtube.Liked, youtube.Disliked, youtube.Disliked}, recStart: 1, autoPlay: true, skip: true},
 		{name: "autoplay boundary", likes: []youtube.LikeStatus{youtube.Liked, youtube.Disliked, youtube.Liked}, recStart: 2, skip: true},
 		{name: "autoplay enabled", likes: []youtube.LikeStatus{youtube.Liked, youtube.Disliked, youtube.Liked}, recStart: 2, autoPlay: true, skip: true, want: 2, ok: true},
 	}

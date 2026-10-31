@@ -51,6 +51,28 @@ func TestRateTrackRefusals(t *testing.T) {
 	}
 }
 
+func TestRateTrackUsesEachRatingEndpoint(t *testing.T) {
+	for _, test := range []struct {
+		status   LikeStatus
+		endpoint string
+	}{
+		{Liked, "/youtubei/v1/like/like"},
+		{Disliked, "/youtubei/v1/like/dislike"},
+		{Indifferent, "/youtubei/v1/like/removelike"},
+	} {
+		t.Run(test.endpoint, func(t *testing.T) {
+			client, path, _ := writeClient(t, http.StatusOK, `{}`)
+			if err := client.RateTrack(context.Background(), "vid-1", test.status); err != nil || *path != test.endpoint {
+				t.Fatalf("RateTrack(%d) = path %q, error %v; want %q", test.status, *path, err, test.endpoint)
+			}
+		})
+	}
+	client, path, _ := writeClient(t, http.StatusOK, `{}`)
+	if err := client.RateTrack(context.Background(), "vid-1", LikeUnknown); err == nil || *path != "" {
+		t.Fatalf("unknown rating wrote to %q: %v", *path, err)
+	}
+}
+
 func TestPanelItemsCarryTheirLikeStatus(t *testing.T) {
 	const response = `{"contents":{"playlistPanelRenderer":{"contents":[
 		{"playlistPanelVideoRenderer":{"videoId":"a","title":{"runs":[{"text":"A"}]},"menu":{"menuRenderer":{"topLevelButtons":[{"likeButtonRenderer":{"likeStatus":"LIKE"}}]}}}},

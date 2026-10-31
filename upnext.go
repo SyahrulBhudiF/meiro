@@ -119,6 +119,9 @@ func (a *app) ensureUpNext() {
 			a.ensureUpNext()
 		case !a.settings.AutoSkipDisliked && continuation != "":
 			a.ensureUpNext() // the list had more to pull
+		case a.settings.AutoSkipDisliked && a.queue.remaining() > 0:
+			u.waiting = false
+			a.advance() // all remaining tracks are disliked
 		default:
 			// A fresh request found nothing to follow the queue with.
 			u.waiting = false
