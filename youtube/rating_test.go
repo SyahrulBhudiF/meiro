@@ -34,19 +34,19 @@ func writeClient(t *testing.T, status int, body string) (*Client, *string, *map[
 }
 
 func TestRateTrackRefusals(t *testing.T) {
-	if err := NewClient(Options{}).RateTrack(context.Background(), "vid-1", true); err == nil {
+	if err := NewClient(Options{}).RateTrack(context.Background(), "vid-1", Liked); err == nil {
 		t.Error("a signed-out like was sent")
 	}
 	client, path, _ := writeClient(t, http.StatusOK, `{}`)
-	if err := client.RateTrack(context.Background(), "  ", true); err == nil || *path != "" {
+	if err := client.RateTrack(context.Background(), "  ", Liked); err == nil || *path != "" {
 		t.Errorf("a like without a video was sent to %q: %v", *path, err)
 	}
 	client, _, _ = writeClient(t, http.StatusBadRequest, `{"error":{"code":400,"message":"Request contains an invalid argument."}}`)
-	if err := client.RateTrack(context.Background(), "vid-1", true); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+	if err := client.RateTrack(context.Background(), "vid-1", Liked); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
 		t.Errorf("a 400 was not an error: %v", err)
 	}
 	client, _, _ = writeClient(t, http.StatusOK, `{"error":{"message":"Precondition check failed."}}`)
-	if err := client.RateTrack(context.Background(), "vid-1", true); err == nil || !strings.Contains(err.Error(), "Precondition check failed.") {
+	if err := client.RateTrack(context.Background(), "vid-1", Liked); err == nil || !strings.Contains(err.Error(), "Precondition check failed.") {
 		t.Errorf("an error object in a 200 was not an error: %v", err)
 	}
 }

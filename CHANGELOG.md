@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Dislike songs.** Use the player or a song's menu to dislike it, and optionally skip songs known to be disliked in Settings → Playback.
 - **Media keys on Windows.** Play, pause, next track, previous track and stop keys control playback from the keyboard, even when Meiro is in the background.
 
 ### Fixed

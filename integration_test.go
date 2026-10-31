@@ -1581,7 +1581,12 @@ func TestClearHistoryFromSettings(t *testing.T) {
 		t.Fatalf("saved %d plays, want 2", len(got))
 	}
 	a.router.Push("/settings")
-	tt := ui.NewTester(a.view, 1000, 4600)
+	tt := ui.NewTester(a.view, 1000, 700)
+	tt.Frame()
+	if err := tt.Click("Search settings"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Type("history")
 	tt.Frame()
 	if !tt.HasText("2 plays are kept on this device") {
 		t.Fatalf("settings do not count the plays: %q", tt.Texts())

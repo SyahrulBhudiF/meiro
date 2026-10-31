@@ -57,25 +57,36 @@ func (a *app) canLike(item youtube.MusicItem) bool {
 // a press while its last change is out is ignored, so the answers cannot
 // arrive in another order than the presses.
 func (a *app) toggleLike(item youtube.MusicItem) {
+	a.toggleRating(item, youtube.Liked)
+}
+
+func (a *app) toggleRating(item youtube.MusicItem, rating youtube.LikeStatus) {
 	id := item.VideoID
 	if !a.canLike(item) || a.writing["like:"+id] {
 		return
 	}
-	before, after := item.Like, youtube.Liked
-	if before == youtube.Liked {
+	before, after := item.Like, rating
+	if before == rating {
 		after = youtube.Indifferent
 	}
 	a.setLike(id, after, false)
 	a.writeBehind("like:"+id, func(ctx context.Context, client *youtube.Client) error {
-		return client.RateTrack(ctx, id, after == youtube.Liked)
+		return client.RateTrack(ctx, id, after)
 	}, func(err error) {
 		if err == nil {
 			return
 		}
 		a.setLike(id, before, false)
 		verb := "like"
-		if after != youtube.Liked {
-			verb = "unlike"
+		if rating == youtube.Disliked {
+			verb = "dislike"
+		}
+		if after == youtube.Indifferent {
+			if rating == youtube.Disliked {
+				verb = "remove dislike from"
+			} else {
+				verb = "unlike"
+			}
 		}
 		a.notice = "Could not " + verb + " “" + item.Title + "”: " + firstLine(err.Error())
 	})
@@ -150,6 +161,22 @@ func (a *app) likeButton(c *ui.Context) {
 		Icon: icon, Label: label, Key: "like", Kind: m3.TonalIcon, Toggle: true, Selected: liked,
 	}).Clicked() {
 		a.toggleLike(a.current)
+	}
+}
+
+func (a *app) dislikeButton(c *ui.Context) {
+	if !a.canLike(a.current) {
+		return
+	}
+	disliked := a.current.Like == youtube.Disliked
+	label := "Dislike " + a.current.Title
+	if disliked {
+		label = "Remove dislike from " + a.current.Title
+	}
+	if m3.IconButton(c, m3.IconButtonSpec{
+		Icon: m3.IconThumbDown, Label: label, Key: "dislike", Kind: m3.TonalIcon, Toggle: true, Selected: disliked,
+	}).Clicked() {
+		a.toggleRating(a.current, youtube.Disliked)
 	}
 }
 

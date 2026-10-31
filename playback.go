@@ -151,7 +151,7 @@ func (a *app) skipUnplayable(item youtube.MusicItem) {
 	if a.current.VideoID != item.VideoID || a.skipped >= maxSkips {
 		return
 	}
-	next, ok := a.queue.next(a.settings.AutoPlay, a.repeat)
+	next, ok := a.queue.nextEligible(a.settings.AutoPlay, a.repeat, a.settings.AutoSkipDisliked)
 	if !ok {
 		return
 	}
@@ -476,8 +476,14 @@ func (a *app) trackEnded() {
 // advance plays the next track of the queue, waiting for recommendations at
 // its end when auto-play is on.
 func (a *app) advance() {
-	if next, ok := a.queue.next(a.settings.AutoPlay, a.repeat); ok {
+	if next, ok := a.queue.nextEligible(a.settings.AutoPlay, a.repeat, a.settings.AutoSkipDisliked); ok {
 		a.startNext(a.queue.moveTo(next))
+		return
+	}
+	if a.settings.AutoSkipDisliked && a.queue.remaining() > 0 &&
+		(!a.settings.AutoPlay || a.upNext.fetched && a.upNext.token == "" && !a.upNext.load.busy()) {
+		a.upNext.waiting = false
+		a.stopAtQueueEnd()
 		return
 	}
 	if a.settings.AutoPlay {
