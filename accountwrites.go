@@ -169,12 +169,12 @@ func (a *app) dislikeButton(c *ui.Context) {
 		return
 	}
 	disliked := a.current.Like == youtube.Disliked
-	label := "Dislike " + a.current.Title
+	label, icon := "Dislike "+a.current.Title, m3.IconThumbDownOutline
 	if disliked {
-		label = "Remove dislike from " + a.current.Title
+		label, icon = "Remove dislike from "+a.current.Title, m3.IconThumbDown
 	}
 	if m3.IconButton(c, m3.IconButtonSpec{
-		Icon: m3.IconThumbDown, Label: label, Key: "dislike", Toggle: true, Selected: disliked,
+		Icon: icon, Label: label, Key: "dislike", Toggle: true, Selected: disliked,
 	}).Clicked() {
 		a.toggleRating(a.current, youtube.Disliked)
 	}
